@@ -219,6 +219,15 @@ type EvidenceSchedule = Goal['evidenceSchedules'][number]
 type ScheduledEvidence = { goal: Goal; schedule: EvidenceSchedule }
 type DueEvidence = ScheduledEvidence & { dueDate: string; trackId: string; occurrenceId: string }
 
+export const MAX_VISIBLE_EVIDENCE_PROMPTS = 3
+
+export function evidencePromptWindow<T>(items: T[]) {
+  return {
+    visible: items.slice(0, MAX_VISIBLE_EVIDENCE_PROMPTS),
+    hiddenCount: Math.max(0, items.length - MAX_VISIBLE_EVIDENCE_PROMPTS),
+  }
+}
+
 /** Only an explicitly shared history can share a capture prompt. */
 export function evidenceTrackKey(item: ScheduledEvidence) {
   const { goal, schedule } = item
@@ -314,6 +323,7 @@ export function updateEvidenceScheduleTrackInData(
         cadence: change.cadence ?? schedule.cadence,
         firstDueDate,
         lastCapturedAt,
+        provenance: 'manual' as const,
       }]
     }),
   }))
@@ -355,6 +365,96 @@ export function updateEvidenceScheduleTrackInData(
       : data.evidence,
     reminderOccurrences,
   }
+}
+
+function inferredScheduleProvenance(goal: Goal, schedule: EvidenceSchedule): NonNullable<EvidenceSchedule['provenance']> {
+  if (schedule.provenance) return schedule.provenance
+  // The noisy release generated exact, deterministic IDs. UUID/manual IDs and
+  // any cadence/kind edits deliberately remain ambiguous and are preserved.
+  const firstDueMatches = !schedule.firstDueDate || schedule.firstDueDate === localDateOf(goal.createdAt)
+  const generatedShape = firstDueMatches && schedule.active && (
+    (schedule.id === `${goal.id}-note-weekly` && schedule.kind === 'note' && schedule.cadence === 'weekly')
+    || (schedule.id === `${goal.id}-number-weekly` && schedule.kind === 'number' && schedule.cadence === 'weekly')
+    || (schedule.id === `${goal.id}-photo-monthly` && schedule.kind === 'photo' && schedule.cadence === 'monthly')
+  )
+  return generatedShape ? 'auto-default' : 'legacy-unknown'
+}
+
+export function isCurrentExecutionGoal(data: AppData, goal: Goal, date = todayLocal()) {
+  if (goal.status !== 'active' || goal.horizon !== '1M' || goal.kind === 'numeric') return false
+  const recentStart = addDays(date, -14)
+  const nearFuture = addDays(date, 7)
+  const recentTask = data.tasks.some(task => task.goalId === goal.id
+    && task.kind !== 'routine'
+    && !['dropped', 'excluded', 'deleted'].includes(task.status ?? 'active')
+    && task.dueDate >= recentStart
+    && task.dueDate <= nearFuture)
+  const recentProgress = goal.history.some(event => ['progressed', 'milestone'].includes(event.action)
+    && localDateOf(event.at) >= recentStart
+    && localDateOf(event.at) <= date)
+  return recentTask || recentProgress
+}
+
+function autoScheduleAllowed(data: AppData, goal: Goal, schedule: EvidenceSchedule, date: string) {
+  const history = schedule.historyId
+    ? data.measurementHistories.find(item => item.id === schedule.historyId && !item.mergedIntoId)
+    : undefined
+  const sharedHistory = Boolean(schedule.historyId && data.goals.filter(item =>
+    item.status === 'active' && item.measurementHistoryId === schedule.historyId).length > 1)
+  if (schedule.kind === 'number' && schedule.cadence === 'weekly'
+    && (sharedHistory || history?.semanticKey === 'body-weight' || history?.semanticKey === 'savings-balance')) return true
+  if (schedule.kind === 'photo' && schedule.cadence === 'monthly' && history?.semanticKey === 'body-weight') return true
+  if (schedule.kind === 'screenshot' && schedule.cadence === 'monthly' && history?.semanticKey === 'savings-balance') return !schedule.active
+  return schedule.kind === 'note' && schedule.cadence === 'weekly' && isCurrentExecutionGoal(data, goal, date)
+}
+
+/**
+ * Retire only confidently identified automatic defaults. Evidence and handled
+ * occurrence history stay intact; pending noise is removed and cannot regenerate.
+ */
+export function reconcileEvidenceReminderPolicy(data: AppData, date = todayLocal()): AppData {
+  const normalizedGoals = data.goals.map(goal => ({
+    ...goal,
+    evidenceSchedules: goal.evidenceSchedules.map(schedule => ({
+      ...schedule,
+      provenance: inferredScheduleProvenance(goal, schedule),
+    })),
+  }))
+  const normalized = { ...data, goals: normalizedGoals }
+  const retiredScheduleIds = new Set<string>()
+  const retiredTrackIds = new Set<string>()
+  const goals = normalizedGoals.map(goal => {
+    let evidenceSchedules = goal.evidenceSchedules.map(schedule => {
+      if (schedule.provenance !== 'auto-default' || autoScheduleAllowed(normalized, goal, schedule, date)) return schedule
+      retiredScheduleIds.add(schedule.id)
+      retiredTrackIds.add(evidenceTrackKey({ goal, schedule }))
+      return schedule.active ? { ...schedule, active: false } : schedule
+    })
+    const currentExecution = isCurrentExecutionGoal(normalized, goal, date)
+    const hasReminderIntent = evidenceSchedules.some(schedule => schedule.active || schedule.provenance !== 'auto-default')
+    const hasRetiredAutoCheckIn = evidenceSchedules.some(schedule => schedule.provenance === 'auto-default'
+      && schedule.kind === 'note' && schedule.cadence === 'weekly')
+    if (currentExecution && !hasReminderIntent && !hasRetiredAutoCheckIn) {
+      evidenceSchedules = [...evidenceSchedules, {
+        id: `${goal.id}-note-weekly`,
+        kind: 'note',
+        cadence: 'weekly',
+        firstDueDate: date,
+        active: true,
+        provenance: 'auto-default',
+      }]
+    }
+    return { ...goal, evidenceSchedules }
+  })
+  const reminderOccurrences = data.reminderOccurrences.filter(item =>
+    !((retiredScheduleIds.has(item.scheduleId) || retiredTrackIds.has(item.trackId))
+      && (item.status === 'due' || item.status === 'snoozed')))
+  const unchangedGoals = goals.every((goal, goalIndex) => goal.evidenceSchedules.every((schedule, scheduleIndex) => {
+    const prior = data.goals[goalIndex]?.evidenceSchedules[scheduleIndex]
+    return prior && Object.keys(schedule).every(key => schedule[key as keyof EvidenceSchedule] === prior[key as keyof EvidenceSchedule])
+  })) && goals.every((goal, index) => goal.evidenceSchedules.length === data.goals[index]?.evidenceSchedules.length)
+  if (unchangedGoals && reminderOccurrences.length === data.reminderOccurrences.length) return data
+  return { ...data, goals, reminderOccurrences }
 }
 
 function scheduleReferenceMatches(
@@ -454,8 +554,12 @@ export function dueEvidence(goals: Goal[], evidence: Evidence[], date = todayLoc
     if (dueDate <= date && !hiddenBySnooze) due.push({ ...representative, dueDate, trackId, occurrenceId })
   }
 
+  const priority = (item: DueEvidence) => item.schedule.kind === 'number' && item.schedule.historyId ? 0
+    : item.schedule.kind === 'note' && item.schedule.provenance === 'auto-default' ? 1
+      : item.schedule.kind === 'photo' || item.schedule.kind === 'screenshot' ? 2 : 3
   return due.sort((left, right) =>
     left.dueDate.localeCompare(right.dueDate)
+    || priority(left) - priority(right)
     || compareScheduledEvidence(left, right),
   )
 }

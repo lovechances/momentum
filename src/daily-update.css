@@ -134,6 +134,7 @@
 .due-capture__actions{display:flex;flex-wrap:wrap;gap:4px;padding:0 0 3px 24px;}
 .due-capture__actions button{min-height:36px;padding:6px 8px;border:1px solid #3c423e;border-radius:8px;color:#b9c0ba;font-size:9px;font-weight:700;}
 .due-capture__actions button:first-child{color:#cde97d;}
+.due-evidence-summary{margin:0;padding:11px 1px;border-bottom:1px solid #2c302e;color:#aeb5af;font-size:10px;font-weight:700;text-align:center;}
 
 .calendar-preview,.link-confirmation{width:100%;min-width:0;border:1px solid #3c4938;border-radius:15px;background:#1c211b;}
 .calendar-preview{min-height:64px;margin:0 0 14px;padding:10px 12px;display:flex;align-items:center;gap:10px;text-align:left;}

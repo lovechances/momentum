@@ -5,6 +5,7 @@ export type TaskKind = 'task' | 'routine' | 'move'
 export type Section = 'Morning' | 'Moves That Matter' | 'Day' | 'Evening'
 export type EvidenceKind = 'photo' | 'screenshot' | 'number' | 'milestone' | 'note'
 export type EvidenceCadence = 'weekly' | 'monthly' | 'quarterly'
+export type EvidenceScheduleProvenance = 'auto-default' | 'manual' | 'legacy-unknown'
 export type GoalDirection = 'increase' | 'decrease'
 export type TaskStatus = 'active' | 'rolled' | 'dropped' | 'excluded' | 'deleted'
 export type DeadlineProvenance = 'calendar-default' | 'manual' | 'legacy-unknown'
@@ -23,7 +24,7 @@ export interface GoalAttempt { at:string; action:'created'|'continued'|'adjusted
 export interface TaskEvent { at:string; action:'edited'|'deleted'|'restored'|'excluded'|'completed'|'reopened'; title?:string; details?:string; section?:Section; dueDate?:string; kind?:TaskKind; goalId?:string }
 export interface Task { id:string; title:string; details?:string; section:Section; done:boolean; kind:TaskKind; goalId?:string; dueDate:string; sourceRoutineId?:string; createdAt:string; carriedCount:number; lightDay?:boolean; status?:TaskStatus; resolvedAt?:string; rolledToId?:string; history?:TaskEvent[] }
 export interface Routine { id:string; title:string; section:Section; recurrence:{ type:'daily'|'weekdays'|'weekdays-custom'; weekdays?:number[] }; active:boolean; goalId?:string; createdAt:string; stoppedAt?:string }
-export interface EvidenceSchedule { id:string; kind:EvidenceKind; cadence:EvidenceCadence; historyId?:string; lastCapturedAt?:string; firstDueDate?:string; active:boolean }
+export interface EvidenceSchedule { id:string; kind:EvidenceKind; cadence:EvidenceCadence; historyId?:string; lastCapturedAt?:string; firstDueDate?:string; active:boolean; provenance?:EvidenceScheduleProvenance }
 export interface Evidence { id:string; goalId?:string; goalIds?:string[]; historyId?:string; observationId?:string; scheduleId?:string; kind:EvidenceKind; capturedAt:string; recordedOn?:string; note?:string; mediaId?:string; value?:number; milestoneId?:string }
 export interface MediaRecord { id:string; blob:Blob; mimeType:string; width?:number; height?:number; bytes:number; createdAt:string }
 export interface Win { id:string; title:string; note?:string; goalId?:string; goalIds?:string[]; mediaId?:string; createdAt:string; recordedOn?:string }

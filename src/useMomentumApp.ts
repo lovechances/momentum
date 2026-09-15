@@ -4,7 +4,7 @@ import { evidenceGoalIds, localDateOf, now, todayLocal } from './domain'
 import { confirmProgressLinkSuggestion, dismissProgressLinkSuggestion, migrateSnapshot } from './migrations'
 import { createInitialData } from './seed'
 import { currentSnapshotGeneration, readSnapshot, StaleSnapshotError, writeSnapshot, writeSnapshotAndMedia } from './storage'
-import { excludeRoutineOccurrence, reconcileSchedule, removeRoutineTaskInstances, resolveRollover as resolveTaskRollover, restoreRoutineOccurrence, satisfyProgressReminderOccurrences, satisfyReminderOccurrences, satisfyWinReminderOccurrences, skipReminderInData, snoozeReminderInData, syncRoutineTaskInstances, updateEvidenceInData, updateEvidenceScheduleTrackInData, updateTaskInData } from './scheduler'
+import { excludeRoutineOccurrence, reconcileEvidenceReminderPolicy, reconcileSchedule, removeRoutineTaskInstances, resolveRollover as resolveTaskRollover, restoreRoutineOccurrence, satisfyProgressReminderOccurrences, satisfyReminderOccurrences, satisfyWinReminderOccurrences, skipReminderInData, snoozeReminderInData, syncRoutineTaskInstances, updateEvidenceInData, updateEvidenceScheduleTrackInData, updateTaskInData } from './scheduler'
 import {
   addGoalToData,
   completeGoal as markGoalComplete,
@@ -161,8 +161,9 @@ export function useMomentumApp() {
   }, [])
 
   const reconcile = useCallback((source: AppData, date = todayLocal()) => {
-    const result = reconcileSchedule(source, date)
-    return { ...source, tasks: result.tasks, periods: result.periods, reminderOccurrences: result.reminderOccurrences, updatedAt: now() }
+    const withReminderPolicy = reconcileEvidenceReminderPolicy(source, date)
+    const result = reconcileSchedule(withReminderPolicy, date)
+    return { ...withReminderPolicy, tasks: result.tasks, periods: result.periods, reminderOccurrences: result.reminderOccurrences, updatedAt: now() }
   }, [])
 
   const applyData = useCallback((next: AppData) => {

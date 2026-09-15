@@ -9,7 +9,7 @@ import type { AppData, Evidence, EvidenceKind, EvidenceSchedule, Goal, Horizon, 
 import { compareProgressEntries, evidenceGoalIds, localDateOf, now, recordedDateOf, timestampForLocalDate, todayLocal } from './domain'
 import { addGoalContextNote, createGoal, deadlineCorrectionPreview, deadlineFor, numericTargetReached, planningAnchorFor, reviewDeadline, type DeadlineReason } from './goals'
 import { calculateMomentum } from './momentum'
-import { dueEvidence, addDays, evidenceTrackKey, matchingEvidenceSchedule, nextEvidenceDueForSchedule, orderRoutineTasksForDisplay, reconcileSchedule, rolloverCandidates } from './scheduler'
+import { dueEvidence, addDays, evidencePromptWindow, evidenceTrackKey, matchingEvidenceSchedule, nextEvidenceDueForSchedule, orderRoutineTasksForDisplay, reconcileSchedule, rolloverCandidates } from './scheduler'
 import { evidenceCaptureGroups, isMeaningfulRecap, recapFacts } from './recap'
 import { compressImage } from './media'
 import { allMedia, clearAll, getMedia, mediaBytes, replaceDatabase } from './storage'
@@ -194,7 +194,7 @@ export default function App() {
       setToast('Evidence reminder resumed')
       return true
     }
-    actions.updateGoal({ ...selectedGoal, evidenceSchedules: [...selectedGoal.evidenceSchedules, { id: crypto.randomUUID(), kind, cadence, historyId: selectedGoal.measurementHistoryId, firstDueDate: todayLocal(), active: true }] })
+    actions.updateGoal({ ...selectedGoal, evidenceSchedules: [...selectedGoal.evidenceSchedules, { id: crypto.randomUUID(), kind, cadence, historyId: selectedGoal.measurementHistoryId, firstDueDate: todayLocal(), active: true, provenance: 'manual' }] })
     setToast('Evidence reminder added')
     return true
   }
@@ -382,8 +382,9 @@ function TodayScreen({ data, momentum, evidenceDue, reminders, onToggle, onAdd, 
   const planningReminders = reminders.filter(item => item.kind === 'planning')
   const lightDay = tasks.length > 0 && tasks.every(task => task.lightDay)
   const [showAllDue, setShowAllDue] = useState(false)
-  const shownEvidence = evidenceDue.slice(0, showAllDue ? undefined : 3)
-  const hiddenDue = Math.max(0, deadlineReminders.length - 2) + Math.max(0, evidenceDue.length - 3) + Math.max(0, recapReminders.length - 1)
+  const evidenceWindow = evidencePromptWindow(evidenceDue)
+  const shownEvidence = evidenceWindow.visible
+  const hiddenDue = Math.max(0, deadlineReminders.length - 2) + Math.max(0, recapReminders.length - 1)
   const reminderTitle = (goal: Goal, kind: EvidenceKind, cadence: string) => {
     if (kind === 'number' && (goal.measurementHistoryId && data.measurementHistories.find(item => item.id === goal.measurementHistoryId)?.semanticKey === 'body-weight')) return `Time for your ${cadence} weight update.`
     if (kind === 'photo' && goal.area === 'Body') return `Your ${cadence} progress photo is due.`
@@ -404,6 +405,7 @@ function TodayScreen({ data, momentum, evidenceDue, reminders, onToggle, onAdd, 
           <div className="due-capture__actions"><button onClick={() => onSnoozeEvidence(occurrenceId, addDays(date, 1))}>Snooze 1 day</button><button onClick={() => onSkipEvidence(occurrenceId)}>Skip this time</button><button onClick={() => onGoal(goal.id)}>Edit cadence</button></div>
         </div>
       })}
+      {evidenceWindow.hiddenCount > 0 && <p className="due-evidence-summary">{evidenceWindow.hiddenCount} more progress check-in{evidenceWindow.hiddenCount === 1 ? '' : 's'}</p>}
       {planningReminders.map(reminder => <button key={reminder.id} onClick={onPlanning}><CalendarDays size={16}/><span><b>{reminder.title}</b><small>{reminder.detail}</small></span><ChevronRight size={15}/></button>)}
       {recapReminders.slice(0, showAllDue ? undefined : 1).map(reminder => { const period = data.periods.find(item => `recap:${item.id}` === reminder.id); return period ? <button key={reminder.id} onClick={() => onRecap(period)}><Layers3 size={16}/><span><b>{reminder.title}</b><small>See the receipts</small></span><ChevronRight size={15}/></button> : null })}
       {(hiddenDue > 0 || showAllDue) && <button className="due-more" aria-expanded={showAllDue} onClick={() => setShowAllDue(value => !value)}>{showAllDue ? 'Show fewer due items' : `Show ${hiddenDue} more due item${hiddenDue === 1 ? '' : 's'}`}</button>}
@@ -688,7 +690,7 @@ function GoalDetail({ goal, data, onChange, onUpdateSchedule, onPause, onComplet
   const saveSchedule = () => {
     if (matchingTrack?.schedule.active) return
     if (matchingTrack) onUpdateSchedule(matchingTrack.goal.id, matchingTrack.schedule.id, { active: true })
-    else onChange({ ...goal, evidenceSchedules: [...goal.evidenceSchedules, { id: crypto.randomUUID(), kind: scheduleKind, cadence: scheduleCadence, historyId: goal.measurementHistoryId, firstDueDate: todayLocal(), active: true }] })
+    else onChange({ ...goal, evidenceSchedules: [...goal.evidenceSchedules, { id: crypto.randomUUID(), kind: scheduleKind, cadence: scheduleCadence, historyId: goal.measurementHistoryId, firstDueDate: todayLocal(), active: true, provenance: 'manual' }] })
     setAddingSchedule(false)
   }
   const measurements = progress.filter(entry => goal.measurementHistoryId ? entry.historyId === goal.measurementHistoryId : entry.goalId === goal.id)

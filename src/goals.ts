@@ -116,23 +116,20 @@ export function defaultEvidenceSchedulesForGoal(goal: Goal, historyId = goal.mea
   const firstDueDate = localDateOf(goal.createdAt)
   if (semanticKey === 'body-weight') {
     return [
-      { id: `${goal.id}-number-weekly`, kind: 'number', cadence: 'weekly', historyId, firstDueDate, active: true },
-      { id: `${goal.id}-photo-monthly`, kind: 'photo', cadence: 'monthly', historyId, firstDueDate, active: true },
+      { id: `${goal.id}-number-weekly`, kind: 'number', cadence: 'weekly', historyId, firstDueDate, active: true, provenance: 'auto-default' },
+      { id: `${goal.id}-photo-monthly`, kind: 'photo', cadence: 'monthly', historyId, firstDueDate, active: true, provenance: 'auto-default' },
     ]
   }
   if (semanticKey === 'savings-balance') {
     return [
-      { id: `${goal.id}-number-weekly`, kind: 'number', cadence: 'weekly', historyId, firstDueDate, active: true },
+      { id: `${goal.id}-number-weekly`, kind: 'number', cadence: 'weekly', historyId, firstDueDate, active: true, provenance: 'auto-default' },
       // Keep the useful screenshot option visible without creating another prompt by default.
-      { id: `${goal.id}-screenshot-monthly`, kind: 'screenshot', cadence: 'monthly', historyId, firstDueDate, active: false },
+      { id: `${goal.id}-screenshot-monthly`, kind: 'screenshot', cadence: 'monthly', historyId, firstDueDate, active: false, provenance: 'auto-default' },
     ]
   }
-  if (goal.kind === 'numeric') {
-    return [{ id: `${goal.id}-number-weekly`, kind: 'number', cadence: 'weekly', historyId, firstDueDate, active: true }]
-  }
-  if (goal.area === 'Business' || goal.kind === 'qualitative') {
-    return [{ id: `${goal.id}-note-weekly`, kind: 'note', cadence: 'weekly', firstDueDate, active: true }]
-  }
+  // Unknown metrics and qualitative outcomes stay capture-ready without
+  // automatically becoming recurring obligations. Current execution goals are
+  // selected later from deterministic task/activity data by the scheduler.
   return []
 }
 

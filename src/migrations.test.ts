@@ -190,8 +190,8 @@ describe('first-run data and resilient migration', () => {
       expect.objectContaining({ id: '3M:2026-04-01', start: '2026-04-01', end: '2026-06-30', finalized: true }),
     ]))
     expect(migrated.periods.some(period => ['3M:2026-07-01', '6M:2026-07-01', 'year:2026-01-01'].includes(period.id))).toBe(false)
-    expect(migrated.goals.find(goal => goal.id === initial.goals[1].id)?.evidenceSchedules).toMatchObject([{ kind: 'note', cadence: 'weekly', active: true }])
-    expect(migrated.goals.find(goal => goal.id === initial.goals[8].id)?.evidenceSchedules).toMatchObject([{ kind: 'note', cadence: 'weekly', active: true }])
+    expect(migrated.goals.find(goal => goal.id === initial.goals[1].id)?.evidenceSchedules).toEqual([])
+    expect(migrated.goals.find(goal => goal.id === initial.goals[8].id)?.evidenceSchedules).toEqual([])
     expect(migrated.goals.find(goal => goal.id === initial.goals[3].id)?.evidenceSchedules).toMatchObject([{ id: `${initial.goals[3].id}-screenshot`, kind: 'screenshot', cadence: 'monthly', active: false }])
     expect(migrateSnapshot(migrated, fixed)).toEqual(migrated)
 

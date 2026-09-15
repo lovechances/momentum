@@ -381,6 +381,7 @@ describe('calendar scheduler', () => {
     const snapshot = data({ goals: [first, second], routines: [] })
     const paused = updateEvidenceScheduleTrackInData(snapshot, first.id, 'first-photo', { active: false })
     expect(paused.goals.flatMap(item => item.evidenceSchedules).every(item => !item.active)).toBe(true)
+    expect(paused.goals.flatMap(item => item.evidenceSchedules).every(item => item.provenance === 'manual')).toBe(true)
     expect(dueEvidence(paused.goals, [], '2026-09-14')).toHaveLength(0)
     const weekly = updateEvidenceScheduleTrackInData(paused, second.id, 'second-photo', { active: true, cadence: 'weekly' })
     expect(weekly.goals.flatMap(item => item.evidenceSchedules).map(item => [item.active, item.cadence])).toEqual([[true, 'weekly'], [true, 'weekly']])
@@ -516,7 +517,7 @@ describe('calendar scheduler', () => {
   it('does not silently merge seeded histories before confirmation', () => {
     const seeded = seededGoals(new Date(2026, 8, 14, 12))
     const due = dueEvidence(seeded, [], '2026-09-14')
-    expect(due).toHaveLength(21)
+    expect(due).toHaveLength(11)
   })
 
   it('lets one capture advance every related horizon without hiding unrelated measurements', () => {
@@ -762,7 +763,7 @@ describe('goal lifecycle', () => {
     ])
 
     const business = goal({ id: 'business', title: 'Launch a useful business', kind: 'qualitative', area: 'Business', baseline: undefined, current: undefined, target: undefined, unit: undefined, measurementHistoryId: undefined, evidenceSchedules: [] })
-    expect(addGoalToData(snapshot, business).goals.at(-1)?.evidenceSchedules).toMatchObject([{ kind: 'note', cadence: 'weekly', active: true }])
+    expect(addGoalToData(snapshot, business).goals.at(-1)?.evidenceSchedules).toEqual([])
   })
 
   it('uses the editable record date for current value and target completion', () => {

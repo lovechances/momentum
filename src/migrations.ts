@@ -5,7 +5,7 @@ import type {
 import { compareProgressEntries, evidenceGoalIds, localDateOf, recordedDateOf, timestampForLocalDate, todayLocal } from './domain'
 import { createInitialData, seededGoals, seededRoutines } from './seed'
 import { completeGoal, deadlineFor, defaultEvidenceSchedulesForGoal, legacyDeadlineFor, numericTargetReached, planningAnchorFor, progressHistoryId } from './goals'
-import { evidenceTrackKey, periodFor, remapEvidenceReminderOccurrences } from './scheduler'
+import { evidenceTrackKey, periodFor, reconcileEvidenceReminderPolicy, remapEvidenceReminderOccurrences } from './scheduler'
 
 const statuses = new Set(['active', 'paused', 'completed', 'closed'])
 const kinds = new Set(['numeric', 'binary', 'milestone', 'consistency', 'qualitative'])
@@ -16,6 +16,7 @@ const taskStatuses = new Set(['active', 'rolled', 'dropped', 'excluded', 'delete
 const evidenceKinds = new Set(['photo', 'screenshot', 'number', 'milestone', 'note'])
 const historyActions = new Set(['created', 'continued', 'adjusted', 'closed', 'completed', 'progressed', 'paused', 'resumed', 'reopened', 'milestone'])
 const deadlineProvenance = new Set(['calendar-default', 'manual', 'legacy-unknown'])
+const scheduleProvenance = new Set(['auto-default', 'manual', 'legacy-unknown'])
 const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 const isTimestamp = (value: unknown): value is string => typeof value === 'string' && Number.isFinite(Date.parse(value))
 const isDate = (value: unknown): value is string => {
@@ -82,6 +83,7 @@ function normalizeGoal(value: Partial<Goal>, fallback: Goal, legacy: boolean): G
       lastCapturedAt: isTimestamp(item.lastCapturedAt) ? item.lastCapturedAt : undefined,
       firstDueDate: isDate(item.firstDueDate) ? item.firstDueDate : undefined,
       active: item.active as boolean,
+      provenance: scheduleProvenance.has(String(item.provenance)) ? item.provenance as Goal['evidenceSchedules'][number]['provenance'] : undefined,
     }))) : fallback.evidenceSchedules.map(schedule => ({ ...schedule, historyId: schedule.historyId ?? measurementHistoryId })),
     createdAt,
   }
@@ -302,14 +304,14 @@ export function migrateSnapshot(value: unknown, date = new Date()): AppData {
   const suggestions = Array.isArray(source.progressLinkSuggestions)
     ? unique(source.progressLinkSuggestions.map(normalizeSuggestion).filter((item): item is ProgressLinkSuggestion => Boolean(item)).map(item => ({ ...item, goalIds: item.goalIds.filter(id => goalIds.has(id)), historyIds: item.historyIds.filter(id => historyIds.has(id)) })))
     : suggestedLinks(goals, fallbackAt)
-  return {
+  return reconcileEvidenceReminderPolicy({
     schema: 3,
     goals, tasks, routines, evidence, wins, progress, measurementHistories,
     progressLinkSuggestions: suggestions,
     routineExclusions, reminderOccurrences, planning, periods, settings,
     onboarded: Boolean(source.onboarded),
     updatedAt: isTimestamp(source.updatedAt) ? source.updatedAt : fallbackAt,
-  }
+  }, todayLocal(date))
 }
 
 function progressLinkState(data: AppData, suggestionId: string, selectedGoalIds?: string[]) {

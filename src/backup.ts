@@ -86,6 +86,7 @@ function validGoal(value: unknown) {
       && oneOf(item.cadence, cadences)
       && (item.lastCapturedAt === undefined || timestamp(item.lastCapturedAt))
       && (item.firstDueDate === undefined || localDate(item.firstDueDate))
+      && (item.provenance === undefined || oneOf(item.provenance, ['auto-default', 'manual', 'legacy-unknown'] as const))
       && typeof item.active === 'boolean')
     && uniqueIds(value.evidenceSchedules as { id: string }[])
     && timestamp(value.createdAt)
