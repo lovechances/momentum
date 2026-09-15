@@ -11,7 +11,7 @@
     "build": "npm run typecheck && npm run check:api && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit && tsc -p api/tsconfig.json --noEmit",
-    "check:api": "vitest run api/ai.test.ts",
+    "check:api": "vitest run api/_ai.test.ts",
     "test": "vitest run",
     "lint": "eslint src api --ext .ts,.tsx"
   },

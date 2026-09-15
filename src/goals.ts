@@ -1,5 +1,5 @@
-import type { Goal, GoalDirection, GoalKind, Horizon } from './domain'
-import { now, todayLocal } from './domain'
+import type { AppData, EvidenceSchedule, Goal, GoalDirection, GoalKind, Horizon, MeasurementHistory, ProgressEntry } from './domain'
+import { compareProgressEntries, localDateOf, now, timestampForLocalDate, todayLocal } from './domain'
 
 export type DeadlineReason =
   | 'did-not-execute'
@@ -20,8 +20,23 @@ function inferredDirection(baseline?: number, target?: number): GoalDirection | 
   return target > baseline ? 'increase' : 'decrease'
 }
 
-/** Add a horizon without JavaScript's Jan 31 -> Mar 3 month overflow. */
+export const planningAnchorFor = (from: Date | string = new Date()) => {
+  const date = typeof from === 'string'
+    ? /^\d{4}-\d{2}-\d{2}$/.test(from) ? new Date(`${from}T12:00:00`) : new Date(from)
+    : new Date(from)
+  date.setDate(1)
+  return todayLocal(date)
+}
+
+/** Calendar-aligned deadline measured from the first of the starting month. */
 export function deadlineFor(horizon: Horizon, from = new Date()) {
+  const result = new Date(from)
+  result.setDate(1)
+  result.setMonth(result.getMonth() + months[horizon])
+  return todayLocal(result)
+}
+
+export function legacyDeadlineFor(horizon: Horizon, from: Date) {
   const result = new Date(from)
   const originalDay = result.getDate()
   result.setDate(1)
@@ -66,6 +81,8 @@ export function createGoal(input: {
     direction,
     unit: input.unit,
     deadline,
+    deadlineAnchor: planningAnchorFor(from),
+    deadlineProvenance: input.deadline ? 'manual' : 'calendar-default',
     status: 'active',
     color: input.color ?? 'sky',
     milestones: [],
@@ -73,6 +90,164 @@ export function createGoal(input: {
     history: [{ at: createdAt, action: 'created', current: input.baseline, target: input.target, deadline }],
     evidenceSchedules: [],
     createdAt,
+  }
+}
+
+export function progressHistoryId(goal: Pick<Goal, 'id' | 'measurementHistoryId'>) {
+  return goal.measurementHistoryId ?? `measurement:${goal.id}`
+}
+
+/** Deliberately narrow semantics: these labels aid setup, but never merge histories. */
+export function measurementSemanticForGoal(goal: Pick<Goal, 'kind' | 'title' | 'unit'>) {
+  if (goal.kind !== 'numeric') return undefined
+  const title = goal.title.trim()
+  const unit = goal.unit?.trim()
+  if (unit?.toLowerCase() === 'lbs' && /(?:lbs?|weight)/i.test(title)) {
+    return { semanticKey: 'body-weight' as const, label: 'Weight' }
+  }
+  if (unit?.toUpperCase() === 'USD' && /(?:stacked|savings?)/i.test(title)) {
+    return { semanticKey: 'savings-balance' as const, label: 'Savings' }
+  }
+  return undefined
+}
+
+export function defaultEvidenceSchedulesForGoal(goal: Goal, historyId = goal.measurementHistoryId, historySemanticKey?: MeasurementHistory['semanticKey']): EvidenceSchedule[] {
+  const semanticKey = historySemanticKey ?? measurementSemanticForGoal(goal)?.semanticKey
+  const firstDueDate = localDateOf(goal.createdAt)
+  if (semanticKey === 'body-weight') {
+    return [
+      { id: `${goal.id}-number-weekly`, kind: 'number', cadence: 'weekly', historyId, firstDueDate, active: true },
+      { id: `${goal.id}-photo-monthly`, kind: 'photo', cadence: 'monthly', historyId, firstDueDate, active: true },
+    ]
+  }
+  if (semanticKey === 'savings-balance') {
+    return [
+      { id: `${goal.id}-number-weekly`, kind: 'number', cadence: 'weekly', historyId, firstDueDate, active: true },
+      // Keep the useful screenshot option visible without creating another prompt by default.
+      { id: `${goal.id}-screenshot-monthly`, kind: 'screenshot', cadence: 'monthly', historyId, firstDueDate, active: false },
+    ]
+  }
+  if (goal.kind === 'numeric') {
+    return [{ id: `${goal.id}-number-weekly`, kind: 'number', cadence: 'weekly', historyId, firstDueDate, active: true }]
+  }
+  if (goal.area === 'Business' || goal.kind === 'qualitative') {
+    return [{ id: `${goal.id}-note-weekly`, kind: 'note', cadence: 'weekly', firstDueDate, active: true }]
+  }
+  return []
+}
+
+/**
+ * Inserts a goal with an explicit measurement history and editable capture defaults.
+ * A supplied history is honored only when it is a live history in this snapshot.
+ */
+export function addGoalToData(data: AppData, input: Goal): AppData {
+  if (data.goals.some(goal => goal.id === input.id)) return data
+  if (input.kind !== 'numeric') {
+    const goal = { ...input, measurementHistoryId: undefined }
+    return { ...data, goals: [...data.goals, { ...goal, evidenceSchedules: goal.evidenceSchedules.length ? goal.evidenceSchedules : defaultEvidenceSchedulesForGoal(goal) }] }
+  }
+
+  const suppliedHistory = input.measurementHistoryId
+    ? data.measurementHistories.find(history => history.id === input.measurementHistoryId && !history.mergedIntoId)
+    : undefined
+  const historyId = suppliedHistory?.id ?? `measurement:${input.id}`
+  const semantic = measurementSemanticForGoal(input)
+  const newHistory: MeasurementHistory | undefined = suppliedHistory ? undefined : {
+    id: historyId,
+    label: semantic?.label ?? input.title,
+    unit: input.unit,
+    semanticKey: semantic?.semanticKey,
+    createdAt: input.createdAt,
+  }
+  const latest = data.progress
+    .filter(entry => (entry.historyId ?? `measurement:${entry.goalId}`) === historyId)
+    .sort(compareProgressEntries)
+    .at(-1)
+  const baseGoal = {
+    ...input,
+    measurementHistoryId: historyId,
+    baseline: input.baseline ?? latest?.value,
+    current: latest?.value ?? input.current,
+  }
+  const evidenceSchedules = baseGoal.evidenceSchedules.length
+    ? baseGoal.evidenceSchedules.map(schedule => ({ ...schedule, historyId: schedule.historyId ?? historyId }))
+    : defaultEvidenceSchedulesForGoal(baseGoal, historyId, suppliedHistory?.semanticKey)
+  return {
+    ...data,
+    goals: [...data.goals, { ...baseGoal, evidenceSchedules }],
+    measurementHistories: newHistory ? [...data.measurementHistories, newHistory] : data.measurementHistories,
+  }
+}
+
+export function currentValueFor(goal: Goal, progress: ProgressEntry[]) {
+  const historyId = progressHistoryId(goal)
+  return progress
+    .filter(entry => (entry.historyId ?? `measurement:${entry.goalId}`) === historyId)
+    .sort(compareProgressEntries)
+    .at(-1)?.value ?? goal.current
+}
+
+/** Insert one observation and derive linked-goal state from local record chronology. */
+export function recordProgressInData(data: AppData, entry: ProgressEntry): AppData {
+  if (data.progress.some(item => item.id === entry.id)) return data
+  const origin = data.goals.find(goal => goal.id === entry.goalId)
+  if (!origin) return data
+  const historyId = entry.historyId ?? progressHistoryId(origin)
+  const observation = { ...entry, historyId, recordedOn: entry.recordedOn ?? localDateOf(entry.recordedAt) }
+  const progress = [...data.progress, observation]
+  const ordered = progress
+    .filter(item => (item.historyId ?? `measurement:${item.goalId}`) === historyId)
+    .sort(compareProgressEntries)
+  const earliest = ordered[0]
+  const latest = ordered.at(-1)!
+  return {
+    ...data,
+    progress,
+    goals: data.goals.map(goal => {
+      if (progressHistoryId(goal) !== historyId) return goal
+      const candidate = { ...goal, baseline: goal.baseline ?? earliest.value, current: latest.value }
+      return latest.id === observation.id && goal.status === 'active' && numericTargetReached(candidate)
+        ? completeGoal(candidate, timestampForLocalDate(observation.recordedOn, entry.recordedAt), 'Target reached by shared measurement')
+        : candidate
+    }),
+  }
+}
+
+export function addGoalContextNote(goal: Goal, value: string): Goal {
+  const note = value.trim().slice(0, 800)
+  if (!note) return goal
+  const existing = goal.contextNotes ?? []
+  if (existing.some(item => item.toLocaleLowerCase() === note.toLocaleLowerCase())) return goal
+  return { ...goal, contextNotes: [...existing.slice(-19), note] }
+}
+
+export function deadlineCorrectionPreview(data: AppData) {
+  return data.goals.flatMap(goal => {
+    if (goal.deadlineProvenance !== 'legacy-unknown' || goal.status === 'completed' || goal.status === 'closed') return []
+    const created = new Date(goal.createdAt)
+    if (goal.deadline !== legacyDeadlineFor(goal.horizon, created)) return []
+    const goalAnchor = goal.deadlineAnchor ?? planningAnchorFor(created)
+    const proposed = deadlineFor(goal.horizon, new Date(`${goalAnchor.slice(0, 10)}T12:00:00`))
+    return proposed === goal.deadline ? [] : [{ goalId: goal.id, title: goal.title, from: goal.deadline, to: proposed }]
+  })
+}
+
+export function confirmDeadlineCorrections(data: AppData, goalIds: string[], at = now()): AppData {
+  const approved = new Map(deadlineCorrectionPreview(data).filter(item => goalIds.includes(item.goalId)).map(item => [item.goalId, item]))
+  if (!approved.size) return data
+  return {
+    ...data,
+    goals: data.goals.map(goal => {
+      const correction = approved.get(goal.id)
+      if (!correction) return goal
+      return {
+        ...goal,
+        deadline: correction.to,
+        deadlineAnchor: goal.deadlineAnchor ?? planningAnchorFor(goal.createdAt),
+        deadlineProvenance: 'calendar-default',
+        history: [...goal.history, { at, action: 'adjusted', note: `Calendar-aligned deadline confirmed; previous deadline ${correction.from}`, current: goal.current, target: goal.target, deadline: correction.to }],
+      }
+    }),
   }
 }
 
@@ -85,10 +260,7 @@ export function numericTargetReached(goal: Goal) {
 }
 
 export function isGoalComplete(goal: Goal) {
-  if (goal.status === 'completed') return true
-  if (goal.kind === 'numeric') return numericTargetReached(goal)
-  if (goal.kind === 'milestone') return goal.milestones.length > 0 && goal.milestones.every(m => m.done)
-  return false
+  return goal.status === 'completed'
 }
 
 export function updateNumeric(goal: Goal, value: number, at = now()): Goal {
@@ -211,6 +383,11 @@ export function reviewDeadline(
   }
 
   const deadline = options.deadline ?? deadlineFor(goal.horizon, new Date(at))
+  const deadlineIsReal = /^\d{4}-\d{2}-\d{2}$/.test(deadline)
+    && localDateOf(new Date(`${deadline}T12:00:00`)) === deadline
+  if (!deadlineIsReal || deadline <= localDateOf(at)) {
+    throw new Error('Continued goals need a real deadline after the review date.')
+  }
   const target = action === 'adjust' ? options.target ?? goal.target : goal.target
   const direction = action === 'adjust' && options.target !== undefined
     ? inferredDirection(goal.baseline, target) ?? goal.direction
@@ -221,6 +398,8 @@ export function reviewDeadline(
     target,
     direction,
     deadline,
+    deadlineAnchor: planningAnchorFor(at),
+    deadlineProvenance: options.deadline ? 'manual' : 'calendar-default',
     history: [
       ...goal.history,
       {

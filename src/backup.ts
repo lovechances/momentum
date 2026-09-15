@@ -1,4 +1,5 @@
 import type { AppData, Goal, MediaRecord } from './domain'
+import { migrateSnapshot } from './migrations'
 
 export type BackupMedia = {
   id: string
@@ -9,7 +10,7 @@ export type BackupMedia = {
   createdAt: string
   base64: string
 }
-export type Backup = { schema: 2; exportedAt: string; data: AppData; media?: BackupMedia[] }
+export type Backup = { schema: 3; exportedAt: string; data: AppData; media?: BackupMedia[] }
 
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value)
 const text = (value: unknown): value is string => typeof value === 'string'
@@ -52,7 +53,7 @@ function validGoal(value: unknown) {
   const horizons = ['1M', '3M', '6M', '1Y', '2Y'] as const
   const kinds = ['numeric', 'binary', 'milestone', 'consistency', 'qualitative'] as const
   const statuses = ['active', 'paused', 'completed', 'closed'] as const
-  const evidenceKinds = ['photo', 'screenshot', 'number', 'milestone'] as const
+  const evidenceKinds = ['photo', 'screenshot', 'number', 'milestone', 'note'] as const
   const cadences = ['weekly', 'monthly', 'quarterly'] as const
   return nonEmpty(value.id)
     && nonEmpty(value.title)
@@ -94,6 +95,7 @@ function validTask(value: unknown) {
   if (!record(value)) return false
   return nonEmpty(value.id)
     && nonEmpty(value.title)
+    && (value.details === undefined || text(value.details))
     && oneOf(value.section, ['Morning', 'Moves That Matter', 'Day', 'Evening'] as const)
     && typeof value.done === 'boolean'
     && oneOf(value.kind, ['task', 'routine', 'move'] as const)
@@ -103,7 +105,7 @@ function validTask(value: unknown) {
     && timestamp(value.createdAt)
     && nonnegativeSafeInteger(value.carriedCount)
     && (value.lightDay === undefined || typeof value.lightDay === 'boolean')
-    && (value.status === undefined || oneOf(value.status, ['active', 'rolled', 'dropped'] as const))
+    && (value.status === undefined || oneOf(value.status, ['active', 'rolled', 'dropped', 'excluded', 'deleted'] as const))
     && (value.resolvedAt === undefined || timestamp(value.resolvedAt))
     && (value.rolledToId === undefined || nonEmpty(value.rolledToId))
 }
@@ -143,7 +145,7 @@ function validSettings(value: unknown) {
     && ['morning', 'evidence', 'recap', 'deadline'].every(key => typeof reminders[key] === 'boolean')
 }
 
-function validData(value: unknown): value is AppData {
+function validLegacyData(value: unknown) {
   if (!record(value) || value.schema !== 2) return false
   if (!Array.isArray(value.goals) || !value.goals.every(validGoal)) return false
   if (!Array.isArray(value.tasks) || !value.tasks.every(validTask)) return false
@@ -152,7 +154,7 @@ function validData(value: unknown): value is AppData {
     && nonEmpty(item.id)
     && (item.goalId === undefined || nonEmpty(item.goalId))
     && (item.scheduleId === undefined || nonEmpty(item.scheduleId))
-    && oneOf(item.kind, ['photo', 'screenshot', 'number', 'milestone'] as const)
+    && oneOf(item.kind, ['photo', 'screenshot', 'number', 'milestone', 'note'] as const)
     && timestamp(item.capturedAt)
     && (item.note === undefined || text(item.note))
     && (item.mediaId === undefined || nonEmpty(item.mediaId))
@@ -195,16 +197,68 @@ function validData(value: unknown): value is AppData {
     && goal.links.every((link: string) => link !== goal.id && goalIds.has(link)))) return false
   if (!value.evidence.every(item => {
     if (!item.scheduleId && !item.milestoneId) return true
-    if (!item.goalId) return false
-    const goal = goalsById.get(item.goalId)
-    return Boolean(goal)
-      && (!item.scheduleId || goal!.evidenceSchedules.some((schedule: Goal['evidenceSchedules'][number]) => schedule.id === item.scheduleId))
-      && (!item.milestoneId || goal!.milestones.some((milestone: Goal['milestones'][number]) => milestone.id === item.milestoneId))
+    const relatedGoals = [...new Set([
+      ...(Array.isArray(item.goalIds) ? item.goalIds.filter(nonEmpty) : []),
+      ...(item.goalId ? [item.goalId] : []),
+    ])].flatMap(id => goalsById.get(id) ?? [])
+    return relatedGoals.length > 0
+      && (!item.scheduleId || relatedGoals.some(goal => goal.evidenceSchedules.some((schedule: Goal['evidenceSchedules'][number]) => schedule.id === item.scheduleId)))
+      && (!item.milestoneId || relatedGoals.some(goal => goal.milestones.some((milestone: Goal['milestones'][number]) => milestone.id === item.milestoneId)))
   })) return false
   // rolledToId is historical metadata. Older valid snapshots may retain the
   // original rollover after the destination task has been pruned, so it is not
   // treated as a required live foreign key.
   if (!value.tasks.every(task => task.rolledToId !== task.id)) return false
+  return true
+}
+
+function validCurrentData(value: unknown): value is AppData {
+  if (!record(value) || value.schema !== 3) return false
+  if (!validLegacyData({ ...value, schema: 2 })) return false
+  if (!Array.isArray(value.measurementHistories) || !value.measurementHistories.every(item => record(item)
+    && nonEmpty(item.id) && nonEmpty(item.label) && timestamp(item.createdAt)
+    && (item.unit === undefined || text(item.unit))
+    && (item.semanticKey === undefined || oneOf(item.semanticKey, ['body-weight', 'savings-balance'] as const))
+    && (item.scopeKey === undefined || text(item.scopeKey))
+    && (item.mergedIntoId === undefined || nonEmpty(item.mergedIntoId)))
+    || !uniqueIds(value.measurementHistories as { id: string }[])) return false
+  const historyIds = new Set((value.measurementHistories as Array<{ id: string }>).map(item => item.id))
+  if (!(value.goals as unknown[]).every(item => record(item)
+    && (item.kind !== 'numeric' || (nonEmpty(item.measurementHistoryId) && historyIds.has(item.measurementHistoryId)))
+    && (item.measurementHistoryId === undefined || (nonEmpty(item.measurementHistoryId) && historyIds.has(item.measurementHistoryId)))
+    && (item.contextNotes === undefined || (Array.isArray(item.contextNotes) && item.contextNotes.every(text)))
+    && (item.deadlineAnchor === undefined || localDate(item.deadlineAnchor))
+    && (item.deadlineProvenance === undefined || oneOf(item.deadlineProvenance, ['calendar-default', 'manual', 'legacy-unknown'] as const)))) return false
+  if (!(value.goals as Array<Goal>).every(goal => goal.evidenceSchedules.every(schedule => schedule.historyId === undefined || historyIds.has(schedule.historyId)))) return false
+  if (!(value.progress as unknown[]).every(item => record(item)
+    && (item.historyId === undefined || (nonEmpty(item.historyId) && historyIds.has(item.historyId)))
+    && (item.recordedOn === undefined || localDate(item.recordedOn)))) return false
+  if (!(value.evidence as unknown[]).every(item => record(item)
+    && (item.goalIds === undefined || (Array.isArray(item.goalIds) && item.goalIds.every((id: unknown) => nonEmpty(id) && (value.goals as Array<{ id: string }>).some(goal => goal.id === id)) && new Set(item.goalIds).size === item.goalIds.length))
+    && (item.historyId === undefined || (nonEmpty(item.historyId) && historyIds.has(item.historyId)))
+    && (item.observationId === undefined || nonEmpty(item.observationId))
+    && (item.recordedOn === undefined || localDate(item.recordedOn)))) return false
+  const observationIds = new Set((value.progress as Array<{ id: string }>).map(item => item.id))
+  if (!(value.evidence as Array<{ observationId?: string }>).every(item => item.observationId === undefined || observationIds.has(item.observationId))) return false
+  if (!(value.wins as unknown[]).every(item => record(item)
+    && (item.goalIds === undefined || (Array.isArray(item.goalIds) && item.goalIds.every((id: unknown) => nonEmpty(id) && (value.goals as Array<{ id: string }>).some(goal => goal.id === id)) && new Set(item.goalIds).size === item.goalIds.length))
+    && (item.recordedOn === undefined || localDate(item.recordedOn)))) return false
+  if (!Array.isArray(value.progressLinkSuggestions) || !value.progressLinkSuggestions.every(item => record(item)
+    && nonEmpty(item.id) && nonEmpty(item.label) && Array.isArray(item.goalIds) && item.goalIds.every(nonEmpty)
+    && Array.isArray(item.historyIds) && item.historyIds.every((id: unknown) => nonEmpty(id) && historyIds.has(id))
+    && oneOf(item.status, ['pending', 'confirmed', 'dismissed'] as const) && timestamp(item.createdAt))) return false
+  if (!uniqueIds(value.progressLinkSuggestions as { id: string }[])) return false
+  if (!Array.isArray(value.routineExclusions) || !value.routineExclusions.every(item => record(item)
+    && nonEmpty(item.id) && nonEmpty(item.routineId) && localDate(item.date) && timestamp(item.createdAt))) return false
+  if (!uniqueIds(value.routineExclusions as { id: string }[])) return false
+  if (!Array.isArray(value.reminderOccurrences) || !value.reminderOccurrences.every(item => record(item)
+    && nonEmpty(item.id) && nonEmpty(item.trackId) && nonEmpty(item.scheduleId) && localDate(item.dueDate)
+    && oneOf(item.status, ['due', 'snoozed', 'skipped', 'satisfied'] as const)
+    && (item.snoozedUntil === undefined || localDate(item.snoozedUntil))
+    && (item.handledAt === undefined || timestamp(item.handledAt))
+    && (item.satisfiedByEntryId === undefined || nonEmpty(item.satisfiedByEntryId)))) return false
+  if (!uniqueIds(value.reminderOccurrences as { id: string }[])) return false
+  if (!record(value.planning) || !localDate(value.planning.anchorMonth) || !value.planning.anchorMonth.endsWith('-01') || !localDate(value.planning.trackingStartedOn)) return false
   return true
 }
 
@@ -239,7 +293,7 @@ function base64ToBytes(value: string) {
 
 export async function createBackup(data: AppData, media: MediaRecord[], includeMedia: boolean): Promise<Backup> {
   const backup: Backup = {
-    schema: 2,
+    schema: 3,
     exportedAt: new Date().toISOString(),
     data,
     media: undefined,
@@ -277,7 +331,13 @@ export async function createBackup(data: AppData, media: MediaRecord[], includeM
 }
 
 export function validateBackup(value: unknown): value is Backup {
-  if (!record(value) || value.schema !== 2 || !timestamp(value.exportedAt) || !validData(value.data)) return false
+  if (!record(value) || !timestamp(value.exportedAt) || (value.schema !== 2 && value.schema !== 3)) return false
+  if (value.schema === 2) {
+    if (!validLegacyData(value.data)) return false
+    value.data = migrateSnapshot(value.data)
+    value.schema = 3
+  }
+  if (!validCurrentData(value.data)) return false
   if (value.media !== undefined && (!Array.isArray(value.media) || !value.media.every(validMedia) || !uniqueIds(value.media))) return false
   if (Array.isArray(value.media)) {
     const mediaIds = new Set(value.media.map(item => item.id))

@@ -4,6 +4,40 @@ const DB_NAME = 'momentum'
 const APP_STORE = 'app'
 const MEDIA_STORE = 'media'
 const KEY = 'snapshot'
+const REVISION_KEY = 'snapshot-revision'
+
+export interface SnapshotWriteContext {
+  initialized: boolean
+  revision?: string
+  snapshotUpdatedAt?: string
+}
+
+export const createSnapshotWriteContext = (): SnapshotWriteContext => ({ initialized: false })
+
+const defaultSnapshotContext = createSnapshotWriteContext()
+
+export class StaleSnapshotError extends Error {
+  constructor() {
+    super('Momentum changed in another tab. Reload this page before saving more changes.')
+    this.name = 'StaleSnapshotError'
+  }
+}
+
+function revisionToken() {
+  return typeof globalThis.crypto?.randomUUID === 'function'
+    ? globalThis.crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+
+function storedRevision(value: unknown) {
+  return typeof value === 'string' && value ? value : undefined
+}
+
+function storedUpdatedAt(value: unknown) {
+  if (!value || typeof value !== 'object') return undefined
+  const updatedAt = (value as { updatedAt?: unknown }).updatedAt
+  return typeof updatedAt === 'string' ? updatedAt : undefined
+}
 
 function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -92,21 +126,134 @@ function afterMutations<T>(operation: () => Promise<T>): Promise<T> {
   return mutationQueue.then(operation)
 }
 
-export const readSnapshot = () => afterMutations(() => store<AppData | undefined>(APP_STORE, 'readonly', objectStore => objectStore.get(KEY)))
+function readSnapshotState(context: SnapshotWriteContext): Promise<AppData | undefined> {
+  return openDatabase().then(db => new Promise((resolve, reject) => {
+    let transaction: IDBTransaction | undefined
+    let settled = false
+    const finish = (callback: () => void) => {
+      if (settled) return
+      settled = true
+      db.close()
+      callback()
+    }
+    try {
+      transaction = db.transaction(APP_STORE, 'readonly')
+      const app = transaction.objectStore(APP_STORE)
+      const snapshotRequest = app.get(KEY)
+      const revisionRequest = app.get(REVISION_KEY)
+      transaction.oncomplete = () => finish(() => {
+        const snapshot = snapshotRequest.result as AppData | undefined
+        context.initialized = true
+        context.revision = storedRevision(revisionRequest.result)
+        context.snapshotUpdatedAt = storedUpdatedAt(snapshot)
+        resolve(snapshot)
+      })
+      transaction.onerror = () => finish(() => reject(transaction?.error || snapshotRequest.error || revisionRequest.error || new Error('Local snapshot could not be read.')))
+      transaction.onabort = () => finish(() => reject(transaction?.error || new Error('Local snapshot reading was canceled.')))
+    } catch (error) {
+      try { transaction?.abort() } catch { /* The transaction may already be inactive. */ }
+      finish(() => reject(error))
+    }
+  }))
+}
+
+export const readSnapshot = (context = defaultSnapshotContext) => afterMutations(() => readSnapshotState(context))
 export const currentSnapshotGeneration = () => snapshotGeneration
-export const writeSnapshot = (snapshot: AppData, generation = snapshotGeneration) => {
+
+function commitSnapshot(
+  snapshot: AppData,
+  changes: { put?: MediaRecord[]; delete?: string[] },
+  context: SnapshotWriteContext,
+  includeMedia: boolean,
+) {
+  return openDatabase().then(db => new Promise<void>((resolve, reject) => {
+    let transaction: IDBTransaction | undefined
+    let settled = false
+    let stale = false
+    const nextRevision = revisionToken()
+    const finish = (callback: () => void) => {
+      if (settled) return
+      settled = true
+      db.close()
+      callback()
+    }
+    try {
+      const recordsToPut = new Map((changes.put ?? []).map(record => [record.id, record]))
+      const idsToDelete = new Set((changes.delete ?? []).filter(id => !recordsToPut.has(id)))
+      transaction = db.transaction(includeMedia ? [APP_STORE, MEDIA_STORE] : APP_STORE, 'readwrite')
+      const activeTransaction = transaction
+      const app = activeTransaction.objectStore(APP_STORE)
+      const revisionRequest = app.get(REVISION_KEY)
+      const snapshotRequest = app.get(KEY)
+      let revisionReady = false
+      let snapshotReady = false
+      let commitStarted = false
+      const commitIfCurrent = () => {
+        if (!revisionReady || !snapshotReady || commitStarted) return
+        commitStarted = true
+        const currentSnapshot = snapshotRequest.result as AppData | undefined
+        const currentRevision = storedRevision(revisionRequest.result)
+        const currentUpdatedAt = storedUpdatedAt(currentSnapshot)
+        const unchanged = context.initialized
+          ? currentRevision === context.revision && currentUpdatedAt === context.snapshotUpdatedAt
+          : currentRevision === undefined && currentSnapshot === undefined
+        if (!unchanged) {
+          stale = true
+          activeTransaction.abort()
+          return
+        }
+        app.put(snapshot, KEY)
+        app.put(nextRevision, REVISION_KEY)
+        if (includeMedia) {
+          const mediaStore = activeTransaction.objectStore(MEDIA_STORE)
+          for (const record of recordsToPut.values()) mediaStore.put(record, record.id)
+          for (const id of idsToDelete) mediaStore.delete(id)
+        }
+      }
+      revisionRequest.onsuccess = () => { revisionReady = true; commitIfCurrent() }
+      snapshotRequest.onsuccess = () => { snapshotReady = true; commitIfCurrent() }
+      activeTransaction.oncomplete = () => finish(() => {
+        context.initialized = true
+        context.revision = nextRevision
+        context.snapshotUpdatedAt = snapshot.updatedAt
+        resolve()
+      })
+      activeTransaction.onerror = () => finish(() => reject(stale ? new StaleSnapshotError() : activeTransaction.error || new Error('Local changes could not be saved.')))
+      activeTransaction.onabort = () => finish(() => reject(stale ? new StaleSnapshotError() : activeTransaction.error || new Error('Local changes saving was canceled.')))
+    } catch (error) {
+      try { transaction?.abort() } catch { /* The transaction may already be inactive. */ }
+      finish(() => reject(error))
+    }
+  }))
+}
+
+export const writeSnapshot = (snapshot: AppData, generation = snapshotGeneration, context = defaultSnapshotContext) => {
   if (generation !== snapshotGeneration) return Promise.resolve()
   return mutate(async () => {
     // A clear/import may have started while this write was waiting behind an
     // earlier IndexedDB mutation. Never let the stale snapshot run afterward.
     if (generation !== snapshotGeneration) return
-    await store<IDBValidKey>(APP_STORE, 'readwrite', objectStore => objectStore.put(snapshot, KEY))
+    await commitSnapshot(snapshot, {}, context, false)
   })
 }
 export const putMedia = (media: MediaRecord) => mutate(() => store<IDBValidKey>(MEDIA_STORE, 'readwrite', objectStore => objectStore.put(media, media.id)))
 export const getMedia = (id: string) => afterMutations(() => store<MediaRecord | undefined>(MEDIA_STORE, 'readonly', objectStore => objectStore.get(id)))
 export const deleteMedia = (id: string) => mutate(() => store<undefined>(MEDIA_STORE, 'readwrite', objectStore => objectStore.delete(id)))
 export const allMedia = () => afterMutations(() => store<MediaRecord[]>(MEDIA_STORE, 'readonly', objectStore => objectStore.getAll()))
+
+/** Commit a snapshot and its media changes together; callers can safely retry with the same IDs. */
+export const writeSnapshotAndMedia = (
+  snapshot: AppData,
+  changes: { put?: MediaRecord[]; delete?: string[] } = {},
+  generation = snapshotGeneration,
+  context = defaultSnapshotContext,
+) => {
+  if (generation !== snapshotGeneration) return Promise.resolve()
+  return mutate(async () => {
+    if (generation !== snapshotGeneration) return
+    await commitSnapshot(snapshot, changes, context, true)
+  })
+}
 
 /** Sum media metadata one record at a time instead of retaining every Blob. */
 export const mediaBytes = () => afterMutations(async () => {
@@ -141,7 +288,7 @@ export const mediaBytes = () => afterMutations(async () => {
   })
 })
 
-export async function clearAll() {
+export async function clearAll(context = defaultSnapshotContext) {
   // Invalidate already-scheduled hook writes synchronously, before this
   // destructive transaction is queued or yields to the event loop.
   snapshotGeneration += 1
@@ -150,6 +297,7 @@ export async function clearAll() {
     return new Promise<void>((resolve, reject) => {
       let transaction: IDBTransaction | undefined
       let settled = false
+      const nextRevision = revisionToken()
       const finish = (callback: () => void) => {
         if (settled) return
         settled = true
@@ -158,10 +306,17 @@ export async function clearAll() {
       }
       try {
         transaction = db.transaction([APP_STORE, MEDIA_STORE], 'readwrite')
-        transaction.oncomplete = () => finish(resolve)
+        transaction.oncomplete = () => finish(() => {
+          context.initialized = true
+          context.revision = nextRevision
+          context.snapshotUpdatedAt = undefined
+          resolve()
+        })
         transaction.onerror = () => finish(() => reject(transaction?.error || new Error('Local data could not be cleared.')))
         transaction.onabort = () => finish(() => reject(transaction?.error || new Error('Local data clearing was canceled.')))
-        transaction.objectStore(APP_STORE).clear()
+        const app = transaction.objectStore(APP_STORE)
+        app.clear()
+        app.put(nextRevision, REVISION_KEY)
         transaction.objectStore(MEDIA_STORE).clear()
       } catch (error) {
         try { transaction?.abort() } catch { /* The transaction may already be inactive. */ }
@@ -172,7 +327,7 @@ export async function clearAll() {
 }
 
 /** Replace app data and media in one transaction so a failed import preserves the old database. */
-export async function replaceDatabase(snapshot: AppData, media: MediaRecord[]) {
+export async function replaceDatabase(snapshot: AppData, media: MediaRecord[], context = defaultSnapshotContext) {
   // Imported data must not be overwritten by a debounce carrying the previous
   // in-memory snapshot.
   snapshotGeneration += 1
@@ -181,6 +336,7 @@ export async function replaceDatabase(snapshot: AppData, media: MediaRecord[]) {
     return new Promise<void>((resolve, reject) => {
       let transaction: IDBTransaction | undefined
       let settled = false
+      const nextRevision = revisionToken()
       const finish = (callback: () => void) => {
         if (settled) return
         settled = true
@@ -189,7 +345,12 @@ export async function replaceDatabase(snapshot: AppData, media: MediaRecord[]) {
       }
       try {
         transaction = db.transaction([APP_STORE, MEDIA_STORE], 'readwrite')
-        transaction.oncomplete = () => finish(resolve)
+        transaction.oncomplete = () => finish(() => {
+          context.initialized = true
+          context.revision = nextRevision
+          context.snapshotUpdatedAt = snapshot.updatedAt
+          resolve()
+        })
         transaction.onerror = () => finish(() => reject(transaction?.error || new Error('Backup restore failed.')))
         transaction.onabort = () => finish(() => reject(transaction?.error || new Error('Backup restore was canceled.')))
         const app = transaction.objectStore(APP_STORE)
@@ -197,6 +358,7 @@ export async function replaceDatabase(snapshot: AppData, media: MediaRecord[]) {
         app.clear()
         mediaStore.clear()
         app.put(snapshot, KEY)
+        app.put(nextRevision, REVISION_KEY)
         media.forEach(record => mediaStore.put(record, record.id))
       } catch (error) {
         try { transaction?.abort() } catch { /* The transaction may already be inactive. */ }

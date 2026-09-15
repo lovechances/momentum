@@ -1,6 +1,7 @@
 import type { Goal, ProgressEntry, Task } from './domain'
-import { localDateOf, todayLocal } from './domain'
+import { compareProgressEntries, localDateOf, recordedDateOf, todayLocal } from './domain'
 import { addDays } from './scheduler'
+import { progressHistoryId } from './goals'
 
 export interface MomentumResult {
   score: number
@@ -36,11 +37,13 @@ function windowScore(
   start: string,
   end: string,
   excludeUnstartedEndDay: boolean,
+  trackingStartedOn?: string,
 ) {
   let scoreableTasks = tasks.filter(task =>
     task.dueDate >= start
     && task.dueDate <= end
     && !task.lightDay
+    && (task.done || (task.status !== 'excluded' && task.status !== 'deleted'))
     && (task.kind === 'move' || task.kind === 'routine'),
   )
 
@@ -70,24 +73,39 @@ function windowScore(
   const progressDates = new Set<string>()
   const progressScores: number[] = []
 
-  for (const goal of goals.filter(goal =>
+  const eligibleGoals = goals.filter(goal =>
     goal.kind === 'numeric'
     && goal.status !== 'paused'
     && goal.status !== 'closed'
     && goal.baseline !== undefined
     && goal.target !== undefined
     && goal.baseline !== goal.target,
-  )) {
+  )
+  const histories = [...new Set(eligibleGoals.map(progressHistoryId))]
+  for (const historyId of histories) {
+    const goal = eligibleGoals
+      .filter(item => progressHistoryId(item) === historyId)
+      .sort((left, right) => Number(left.status !== 'active') - Number(right.status !== 'active')
+        || left.deadline.localeCompare(right.deadline)
+        || left.createdAt.localeCompare(right.createdAt))[0]
+    if (!goal) continue
     const baseline = goal.baseline
     const target = goal.target
     if (baseline === undefined || target === undefined) continue
     const entries = progress
-      .filter(entry => entry.goalId === goal.id && localDateOf(entry.recordedAt) <= end)
-      .sort((a, b) => a.recordedAt.localeCompare(b.recordedAt))
-    const inWindow = entries.filter(entry => localDateOf(entry.recordedAt) >= start)
+      .filter(entry => (entry.historyId ?? `measurement:${entry.goalId}`) === historyId
+        && recordedDateOf(entry) <= end
+        && (!trackingStartedOn || recordedDateOf(entry) >= trackingStartedOn))
+      .sort(compareProgressEntries)
+    const inWindow = entries.filter(entry => recordedDateOf(entry) >= start)
     if (!inWindow.length) continue
-    const beforeWindow = entries.filter(entry => localDateOf(entry.recordedAt) < start).at(-1)
-    const createdBaseline = goal.history.find(item => item.action === 'created')?.current
+    const beforeWindow = entries.filter(entry => recordedDateOf(entry) < start).at(-1)
+    const created = goal.history.find(item => item.action === 'created')
+    const createdBaseline = created
+      && localDateOf(created.at) >= start
+      && localDateOf(created.at) <= end
+      ? created.current
+      : undefined
     const startValue = beforeWindow?.value ?? createdBaseline ?? (inWindow.length > 1 ? inWindow[0].value : undefined)
     if (startValue === undefined) continue
     const endValue = inWindow.at(-1)!.value
@@ -95,7 +113,7 @@ function windowScore(
     const targetDistance = Math.abs(target - baseline)
     if (!direction || !targetDistance) continue
     progressScores.push(clamp(((endValue - startValue) * direction) / targetDistance))
-    for (const entry of inWindow) progressDates.add(localDateOf(entry.recordedAt))
+    for (const entry of inWindow) progressDates.add(recordedDateOf(entry))
   }
 
   const progressScore = average(progressScores)
@@ -130,13 +148,15 @@ export function calculateMomentum(
   goals: Goal[],
   progress: ProgressEntry[],
   date = todayLocal(),
-  options: { includeCurrentDay?: boolean } = {},
+  options: { includeCurrentDay?: boolean; trackingStartedOn?: string } = {},
 ): MomentumResult {
-  const start = addDays(date, -(WINDOW_DAYS - 1))
-  const current = windowScore(tasks, goals, progress, start, date, !options.includeCurrentDay)
-  const previousEnd = addDays(start, -1)
-  const previousStart = addDays(previousEnd, -(WINDOW_DAYS - 1))
-  const previous = windowScore(tasks, goals, progress, previousStart, previousEnd, false)
+  const nominalStart = addDays(date, -(WINDOW_DAYS - 1))
+  const start = options.trackingStartedOn && options.trackingStartedOn > nominalStart ? options.trackingStartedOn : nominalStart
+  const current = windowScore(tasks, goals, progress, start, date, !options.includeCurrentDay, options.trackingStartedOn)
+  const previousEnd = addDays(nominalStart, -1)
+  const nominalPreviousStart = addDays(previousEnd, -(WINDOW_DAYS - 1))
+  const previousStart = options.trackingStartedOn && options.trackingStartedOn > nominalPreviousStart ? options.trackingStartedOn : nominalPreviousStart
+  const previous = windowScore(tasks, goals, progress, previousStart, previousEnd, false, options.trackingStartedOn)
   return {
     score: current.score,
     status: current.eligibleDays >= MIN_READY_DAYS ? 'ready' : 'building',

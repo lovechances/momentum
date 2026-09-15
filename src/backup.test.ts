@@ -28,6 +28,7 @@ function richSnapshot(): AppData {
     target: 150,
     direction: 'increase',
     unit: 'lbs',
+    measurementHistoryId: 'measurement:qa-goal',
     deadline: '2026-10-14',
     status: 'active',
     color: 'lime',
@@ -38,7 +39,7 @@ function richSnapshot(): AppData {
       { at, action: 'created', current: 140, target: 150, deadline: '2026-10-14' },
       { at: '2026-09-15T12:00:00.000Z', action: 'progressed', current: 142, target: 150 },
     ],
-    evidenceSchedules: [{ id: 'qa-photo', kind: 'photo', cadence: 'monthly', lastCapturedAt: at, active: true }],
+    evidenceSchedules: [{ id: 'qa-photo', kind: 'photo', cadence: 'monthly', historyId: 'measurement:qa-goal', lastCapturedAt: at, active: true }],
     createdAt: at,
   }
   const linkedGoal: Goal = {
@@ -53,7 +54,7 @@ function richSnapshot(): AppData {
     evidenceSchedules: [],
   }
   return {
-    schema: 2,
+    schema: 3,
     goals: [goal, linkedGoal],
     routines: [{ id: 'qa-routine', title: 'Morning QA', section: 'Morning', recurrence: { type: 'weekdays-custom', weekdays: [1, 3, 5] }, active: true, goalId: goal.id, createdAt: at }],
     tasks: [
@@ -63,6 +64,11 @@ function richSnapshot(): AppData {
       { id: 'qa-carried', title: 'Carried work', section: 'Day', done: false, kind: 'task', dueDate: '2026-09-14', createdAt: at, carriedCount: 1, status: 'active' },
     ],
     progress: [{ id: 'qa-progress', goalId: goal.id, value: 142, recordedAt: at, note: 'Measured' }],
+    measurementHistories: [{ id: 'measurement:qa-goal', label: 'QA metric', unit: 'lbs', createdAt: at }],
+    progressLinkSuggestions: [],
+    routineExclusions: [],
+    reminderOccurrences: [],
+    planning: { anchorMonth: '2026-09-01', trackingStartedOn: '2026-09-14' },
     evidence: [
       { id: 'qa-photo-evidence', goalId: goal.id, scheduleId: 'qa-photo', kind: 'photo', capturedAt: at, note: 'Front view', mediaId: 'qa-photo-media' },
       { id: 'qa-number-evidence', goalId: goal.id, kind: 'number', capturedAt: at, note: 'Weekly measurement', value: 142 },
@@ -130,6 +136,27 @@ describe('release-candidate backup round trip', () => {
     expect(await restoreMedia(exported)).toHaveLength(1)
   })
 
+  it('round-trips nested evidence owned by a non-primary linked goal', async () => {
+    const snapshot = richSnapshot()
+    const sharedSnapshot = {
+      ...snapshot,
+      evidence: snapshot.evidence.map(item => item.id === 'qa-milestone-evidence'
+        ? { ...item, goalId: 'linked-goal', goalIds: ['linked-goal', 'qa-goal'] }
+        : item),
+    }
+
+    const exported = await createBackup(sharedSnapshot, [], false)
+    const parsed: unknown = JSON.parse(JSON.stringify(exported))
+
+    expect(validateBackup(parsed)).toBe(true)
+    if (!validateBackup(parsed)) throw new Error('Expected a valid backup')
+    expect(parsed.data.evidence.find(item => item.id === 'qa-milestone-evidence')).toMatchObject({
+      goalId: 'linked-goal',
+      goalIds: ['linked-goal', 'qa-goal'],
+      milestoneId: 'qa-milestone',
+    })
+  })
+
   it('rejects missing, duplicated, orphaned, or byte-mismatched media', async () => {
     const snapshot = richSnapshot()
     const photo = media('qa-photo-media', [1, 2, 3, 4])
@@ -142,5 +169,32 @@ describe('release-candidate backup round trip', () => {
     const valid = await createBackup(snapshot, [photo, win], true)
     expect(validateBackup({ ...valid, media: [...valid.media!, { id: 'orphan', mimeType: 'image/jpeg', bytes: 1, createdAt: at, base64: 'AQ==' }] })).toBe(false)
     expect(validateBackup({ ...valid, media: valid.media!.map((item, index) => index ? item : { ...item, bytes: item.bytes + 1 }) })).toBe(false)
+  })
+
+  it('accepts a populated schema-2 full backup and upgrades it before restore', async () => {
+    const current = await createBackup(richSnapshot(), [media('qa-photo-media', [1, 2, 3, 4]), media('qa-win-media', [9, 8, 7])], true)
+    const legacy = JSON.parse(JSON.stringify(current))
+    legacy.schema = 2
+    legacy.data.schema = 2
+    delete legacy.data.measurementHistories
+    delete legacy.data.progressLinkSuggestions
+    delete legacy.data.routineExclusions
+    delete legacy.data.reminderOccurrences
+    delete legacy.data.planning
+    for (const goal of legacy.data.goals) {
+      delete goal.measurementHistoryId
+      delete goal.deadlineAnchor
+      delete goal.deadlineProvenance
+      for (const schedule of goal.evidenceSchedules) delete schedule.historyId
+    }
+    for (const entry of legacy.data.progress) { delete entry.historyId; delete entry.recordedOn }
+    for (const entry of legacy.data.evidence) { delete entry.goalIds; delete entry.historyId; delete entry.recordedOn }
+    for (const win of legacy.data.wins) { delete win.goalIds; delete win.recordedOn }
+
+    expect(validateBackup(legacy)).toBe(true)
+    expect(legacy).toMatchObject({ schema: 3, data: { schema: 3 } })
+    expect(legacy.data.progress[0]).toMatchObject({ id: 'qa-progress', recordedAt: at, recordedOn: '2026-09-14' })
+    const restored = await restoreMedia(legacy)
+    expect(restored.map(item => item.id).sort()).toEqual(['qa-photo-media', 'qa-win-media'])
   })
 })

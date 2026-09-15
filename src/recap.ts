@@ -1,6 +1,10 @@
 import type { AppData, PeriodRecord } from './domain'
-import { localDateOf } from './domain'
+import { compareProgressEntries, localDateOf, recordedDateOf } from './domain'
 import { calculateMomentum } from './momentum'
+import { progressHistoryId } from './goals'
+import { evidenceCaptureGroups } from './evidence-captures'
+
+export { compareEvidenceCaptures, evidenceCaptureGroups, evidenceCaptureKey } from './evidence-captures'
 
 export interface RecapFacts {
   period: PeriodRecord
@@ -12,6 +16,7 @@ export interface RecapFacts {
   milestones: string[]
   numeric: {
     goalId: string
+    historyId: string
     title: string
     start: number
     end: number
@@ -26,35 +31,49 @@ export interface RecapFacts {
   needsAttention: string
 }
 
-const inPeriod = (value: string, period: PeriodRecord) => value >= period.start && value <= period.end
+const inPeriod = (value: string, period: PeriodRecord) => value >= (period.effectiveStart ?? period.start) && value <= period.end
 
 export function isMeaningfulRecap(data: AppData, period: PeriodRecord) {
-  return data.tasks.some(task => inPeriod(task.dueDate, period) && (task.kind !== 'routine' || task.done))
-    || data.progress.some(item => inPeriod(localDateOf(item.recordedAt), period))
-    || data.evidence.some(item => inPeriod(localDateOf(item.capturedAt), period))
-    || data.wins.some(item => inPeriod(localDateOf(item.createdAt), period))
-    || data.goals.some(goal => goal.history.some(item => item.action !== 'created' && inPeriod(localDateOf(item.at), period)))
+  if (period.end < data.planning.trackingStartedOn) return false
+  const scopedPeriod = { ...period, effectiveStart: [period.effectiveStart ?? period.start, data.planning.trackingStartedOn].sort().at(-1)! }
+  return data.tasks.some(task => (task.done || (task.status !== 'excluded' && task.status !== 'deleted')) && inPeriod(task.dueDate, scopedPeriod) && (task.kind !== 'routine' || task.done))
+    || data.progress.some(item => inPeriod(recordedDateOf(item), scopedPeriod))
+    || evidenceCaptureGroups(data).some(capture => inPeriod(recordedDateOf(capture.canonical), scopedPeriod))
+    || data.wins.some(item => inPeriod(recordedDateOf(item), scopedPeriod))
+    || data.goals.some(goal => goal.history.some(item => item.action !== 'created' && inPeriod(localDateOf(item.at), scopedPeriod)))
 }
 
 export function recapFacts(data: AppData, period: PeriodRecord): RecapFacts {
-  const tasks = data.tasks.filter(task => inPeriod(task.dueDate, period) && !task.lightDay)
+  const periodStart = [period.effectiveStart ?? period.start, data.planning.trackingStartedOn].sort().at(-1)!
+  const scopedPeriod = { ...period, effectiveStart: periodStart }
+  const tasks = data.tasks.filter(task => inPeriod(task.dueDate, scopedPeriod) && !task.lightDay && (task.done || (task.status !== 'excluded' && task.status !== 'deleted')))
   const moves = tasks.filter(task => task.kind === 'move')
-  const numeric = data.goals.filter(goal => goal.kind === 'numeric').flatMap(goal => {
+  const numericGoals = data.goals.filter(goal => goal.kind === 'numeric')
+  const numeric = [...new Set(numericGoals.map(progressHistoryId))].flatMap(historyId => {
+    const linkedGoals = numericGoals.filter(goal => progressHistoryId(goal) === historyId)
+    const goal = [...linkedGoals].sort((left, right) => left.deadline.localeCompare(right.deadline) || left.createdAt.localeCompare(right.createdAt))[0]
+    if (!goal) return []
     const entries = data.progress
-      .filter(entry => entry.goalId === goal.id && localDateOf(entry.recordedAt) <= period.end)
-      .sort((a, b) => a.recordedAt.localeCompare(b.recordedAt))
-    const during = entries.filter(entry => localDateOf(entry.recordedAt) >= period.start)
+      .filter(entry => (entry.historyId ?? `measurement:${entry.goalId}`) === historyId
+        && recordedDateOf(entry) <= period.end
+        && (!period.effectiveStart || recordedDateOf(entry) >= periodStart))
+      .sort(compareProgressEntries)
+    const during = entries.filter(entry => recordedDateOf(entry) >= periodStart)
     if (!during.length) return []
 
-    const before = entries.filter(entry => localDateOf(entry.recordedAt) < period.start).at(-1)
+    const before = entries.filter(entry => recordedDateOf(entry) < periodStart).at(-1)
     const created = goal.history.find(item => item.action === 'created')
     const originalBaseline = created?.current
-    const baselineAvailable = created !== undefined && originalBaseline !== undefined && localDateOf(created.at) <= period.end
+    const baselineAvailable = created !== undefined
+      && originalBaseline !== undefined
+      && localDateOf(created.at) <= period.end
+      && localDateOf(created.at) >= periodStart
     const start = before?.value ?? (baselineAvailable ? originalBaseline : during[0].value)
     const end = during.at(-1)!.value
     return [{
       goalId: goal.id,
-      title: goal.title,
+      historyId,
+      title: data.measurementHistories.find(history => history.id === historyId)?.label ?? goal.title,
       start,
       end,
       change: end - start,
@@ -78,21 +97,23 @@ export function recapFacts(data: AppData, period: PeriodRecord): RecapFacts {
     : '—'
 
   const wins = data.wins
-    .filter(win => inPeriod(localDateOf(win.createdAt), period))
+    .filter(win => inPeriod(recordedDateOf(win), scopedPeriod))
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
     .map(win => win.title)
+  const captures = evidenceCaptureGroups(data)
   const milestones = [...new Set([
-    ...data.evidence
-      .filter(item => item.kind === 'milestone' && inPeriod(localDateOf(item.capturedAt), period))
+    ...captures
+      .filter(capture => inPeriod(recordedDateOf(capture.canonical), scopedPeriod))
+      .flatMap(capture => capture.items.filter(item => item.kind === 'milestone').slice(0, 1))
       .map(item => item.note?.trim() || data.goals.find(goal => goal.id === item.goalId)?.milestones.find(milestone => milestone.id === item.milestoneId)?.title),
     ...data.goals.flatMap(goal => goal.history
-      .filter(item => inPeriod(localDateOf(item.at), period) && item.note?.startsWith('Completed milestone: '))
+      .filter(item => inPeriod(localDateOf(item.at), scopedPeriod) && item.note?.startsWith('Completed milestone: '))
       .map(item => item.note!.slice('Completed milestone: '.length).trim())),
   ].filter((value): value is string => Boolean(value)))]
   const completedGoals = data.goals.flatMap(goal => {
     let completionIndex = -1
     goal.history.forEach((item, index) => {
-      if (item.action === 'completed' && inPeriod(localDateOf(item.at), period)) completionIndex = index
+      if (item.action === 'completed' && inPeriod(localDateOf(item.at), scopedPeriod)) completionIndex = index
     })
     if (completionIndex < 0) return []
     const reopenedBeforePeriodEnd = goal.history.slice(completionIndex + 1).some(item =>
@@ -101,7 +122,7 @@ export function recapFacts(data: AppData, period: PeriodRecord): RecapFacts {
     return reopenedBeforePeriodEnd ? [] : [goal.title]
   })
 
-  const momentum = calculateMomentum(tasks, data.goals, data.progress, period.end, { includeCurrentDay: true })
+  const momentum = calculateMomentum(tasks, data.goals, data.progress, period.end, { includeCurrentDay: true, trackingStartedOn: periodStart })
   return {
     period,
     momentum: momentum.score,
@@ -112,7 +133,7 @@ export function recapFacts(data: AppData, period: PeriodRecord): RecapFacts {
     milestones,
     numeric,
     completedGoals,
-    evidenceCount: data.evidence.filter(item => inPeriod(localDateOf(item.capturedAt), period)).length,
+    evidenceCount: captures.filter(capture => inPeriod(recordedDateOf(capture.canonical), scopedPeriod)).length,
     strongest,
     needsAttention,
   }

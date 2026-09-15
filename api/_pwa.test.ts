@@ -1,3 +1,4 @@
+// The leading underscore keeps this build suite out of Vercel's /api route discovery.
 import { readFile, stat } from 'node:fs/promises'
 import vm from 'node:vm'
 import { describe, expect, it, vi } from 'vitest'

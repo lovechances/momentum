@@ -1,6 +1,6 @@
-import type { AppData, Goal, GoalKind, Horizon, Routine } from './domain'
-import { deadlineFor } from './goals'
-import { now } from './domain'
+import type { AppData, Goal, GoalKind, Horizon, MeasurementHistory, ProgressLinkSuggestion, Routine } from './domain'
+import { deadlineFor, defaultEvidenceSchedulesForGoal, planningAnchorFor, progressHistoryId } from './goals'
+import { now, todayLocal } from './domain'
 
 const goalSeed: Array<[string, Horizon, string | undefined, GoalKind, 'active' | 'completed']> = [
   ['140 lbs clean', '1M', 'Body', 'numeric', 'active'],
@@ -41,7 +41,7 @@ export function seededGoals(createdAt = new Date()): Goal[] {
   return goalSeed.map(([title, horizon, area, kind, status], index) => {
     const target = targetFromTitle(title)
     const id = `seed-goal-${index + 1}`
-    return {
+    const goal: Goal = {
       id,
       title,
       horizon,
@@ -50,6 +50,8 @@ export function seededGoals(createdAt = new Date()): Goal[] {
       target,
       unit: title.includes('lbs') ? 'lbs' : title.startsWith('$') ? 'USD' : title === '10k+ on platforms' ? 'followers' : undefined,
       deadline: deadlineFor(horizon, createdAt),
+      deadlineAnchor: planningAnchorFor(createdAt),
+      deadlineProvenance: 'calendar-default',
       status,
       color: area === 'Body' ? 'lime' : area === 'Money' ? 'gold' : area === 'Business' ? 'violet' : 'sky',
       milestones: [],
@@ -57,13 +59,11 @@ export function seededGoals(createdAt = new Date()): Goal[] {
       // A locked seed may already be complete, but its actual completion date is
       // unknown. Keep the status without inventing a completion event for Recap.
       history: [{ at: created, action: 'created', target, deadline: deadlineFor(horizon, createdAt) }],
-      evidenceSchedules: kind === 'numeric' && area === 'Body'
-        ? [{ id: `${id}-number`, kind: 'number', cadence: 'weekly', active: true }, { id: `${id}-photo`, kind: 'photo', cadence: 'monthly', active: true }]
-        : kind === 'numeric' && area === 'Money'
-          ? [{ id: `${id}-number`, kind: 'number', cadence: 'weekly', active: true }, { id: `${id}-screenshot`, kind: 'screenshot', cadence: 'monthly', active: true }]
-          : [],
+      evidenceSchedules: [],
+      measurementHistoryId: kind === 'numeric' ? `measurement:${id}` : undefined,
       createdAt: created,
     }
+    return { ...goal, evidenceSchedules: status === 'active' ? defaultEvidenceSchedulesForGoal(goal) : [] }
   })
 }
 
@@ -78,9 +78,35 @@ export function seededRoutines(createdAt = now()): Routine[] {
 
 export function createInitialData(date = new Date()): AppData {
   const created = date.toISOString()
+  const goals = seededGoals(date)
+  const measurementHistories: MeasurementHistory[] = goals.filter(goal => goal.kind === 'numeric').map(goal => ({
+    id: progressHistoryId(goal),
+    label: goal.unit === 'lbs' ? 'Weight' : /stacked/i.test(goal.title) ? 'Savings' : goal.title,
+    unit: goal.unit,
+    semanticKey: goal.unit === 'lbs' ? 'body-weight' : /stacked/i.test(goal.title) ? 'savings-balance' : undefined,
+    scopeKey: goal.unit === 'lbs' ? 'body' : /stacked/i.test(goal.title) ? 'primary-savings-pool' : undefined,
+    createdAt: goal.createdAt,
+  }))
+  const suggestionCandidates = [
+    { id: 'link-suggestion:body-weight', label: 'Weight', goalIds: goals.filter(goal => goal.kind === 'numeric' && goal.unit?.toLowerCase() === 'lbs' && /(?:lbs|weight)/i.test(goal.title)).map(goal => goal.id) },
+    { id: 'link-suggestion:savings-balance', label: 'Savings', goalIds: goals.filter(goal => goal.kind === 'numeric' && goal.unit?.toUpperCase() === 'USD' && /(?:stacked|savings?)/i.test(goal.title)).map(goal => goal.id) },
+  ]
+  const suggestions: ProgressLinkSuggestion[] = suggestionCandidates.filter(item => item.goalIds.length > 1).map(item => ({
+    ...item,
+    historyIds: item.goalIds.map(goalId => `measurement:${goalId}`),
+    status: 'pending' as const,
+    createdAt: created,
+  }))
+  const trackingStartedOn = todayLocal(date)
   return {
-    schema: 2,
-    goals: seededGoals(date), tasks: [], routines: seededRoutines(created), evidence: [], wins: [], progress: [], periods: [],
+    schema: 3,
+    goals, tasks: [], routines: seededRoutines(created), evidence: [], wins: [], progress: [],
+    measurementHistories,
+    progressLinkSuggestions: suggestions,
+    routineExclusions: [],
+    reminderOccurrences: [],
+    planning: { anchorMonth: planningAnchorFor(date), trackingStartedOn },
+    periods: [],
     settings: {
       areas: ['Money', 'Business', 'Body', 'Life'],
       ai: { enabled: false, monthlyCap: 0.5, month: created.slice(0, 7), estimatedCost: 0, inputTokens: 0, outputTokens: 0, requests: 0 },

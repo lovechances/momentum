@@ -7,24 +7,49 @@ export const PRICE_PER_MILLION = AI_PRICE_PER_MILLION
 export const AI_REQUEST_RESERVE = 0.01
 export const currentMonth = (date = new Date()) => todayLocal(date).slice(0, 7)
 
-export type AiPlan = {
+export type AiAction = 'plan' | 'today' | 'week' | 'recap'
+
+export type AiSuggestion = {
+  id: string
+  goalId: string
+  title: string
+  nextStep: string
+  reason: string
+  estimatedMinutes: number
+  existingTaskId: string
+}
+
+export type AiClarification = { goalId: string; question: string }
+
+export type AiTodayResult = {
+  kind: 'today'
+  suggestions: AiSuggestion[]
+  clarification: AiClarification
+}
+
+export type AiPlanResult = {
+  kind: 'plan'
+  goalId: string
   clarifiedGoal: string
   milestones: string[]
-  actions: string[]
+  suggestions: AiSuggestion[]
   evidenceSuggestions: string[]
-  goalLinks: string[]
+  goalLinks: Array<{ goalId: string; reason: string }>
   notes: string
+  clarification: AiClarification
 }
 
-export type AiUsage = {
-  input_tokens: number
-  output_tokens: number
+export type AiPerspectiveResult = {
+  kind: 'week' | 'recap'
+  summary: string
+  highlights: string[]
+  nextFocus: string
 }
 
-export type AiResponse = {
-  output: AiPlan
-  usage?: AiUsage
-}
+export type AiResult = AiTodayResult | AiPlanResult | AiPerspectiveResult
+
+export type AiUsage = { input_tokens: number; output_tokens: number }
+export type AiResponse = { output: AiResult; usage?: AiUsage }
 
 export function applyMonthlyReset(ai: Settings['ai'], date = new Date()): Settings['ai'] {
   const month = currentMonth(date)
@@ -66,33 +91,91 @@ export function recordAiResponse(ai: Settings['ai'], usage?: AiUsage, date = new
   return { ...current, requests: current.requests + 1, estimatedCost: current.estimatedCost + AI_REQUEST_RESERVE }
 }
 
-const boundedStrings = (value: unknown, maxItems: number) => Array.isArray(value)
+const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value)
+  && typeof value === 'object'
+  && !Array.isArray(value)
+
+const exactKeys = (value: Record<string, unknown>, keys: string[]) =>
+  Object.keys(value).sort().join('|') === [...keys].sort().join('|')
+
+const boundedString = (value: unknown, max: number, allowEmpty = true) => typeof value === 'string'
+  && value.length <= max
+  && (allowEmpty || value.trim().length > 0)
+
+const boundedStrings = (value: unknown, maxItems: number, maxLength: number) => Array.isArray(value)
   && value.length <= maxItems
-  && value.every(item => typeof item === 'string' && item.length <= 1_000)
+  && value.every(item => boundedString(item, maxLength, false))
 
-const planKeys = ['actions', 'clarifiedGoal', 'evidenceSuggestions', 'goalLinks', 'milestones', 'notes']
+function validateSuggestion(value: unknown): value is AiSuggestion {
+  if (!isRecord(value) || !exactKeys(value, ['estimatedMinutes', 'existingTaskId', 'goalId', 'id', 'nextStep', 'reason', 'title'])) return false
+  return boundedString(value.id, 128, false)
+    && boundedString(value.goalId, 128)
+    && boundedString(value.title, 160, false)
+    && boundedString(value.nextStep, 600, false)
+    && boundedString(value.reason, 360, false)
+    && Number.isSafeInteger(value.estimatedMinutes)
+    && Number(value.estimatedMinutes) >= 0
+    && Number(value.estimatedMinutes) <= 480
+    && boundedString(value.existingTaskId, 128)
+}
 
-export function validatePlan(value: unknown): value is AiPlan {
-  if (!value || typeof value !== 'object') return false
-  const plan = value as Record<string, unknown>
-  return Object.keys(plan).sort().join('|') === planKeys.join('|')
-    && typeof plan.clarifiedGoal === 'string'
-    && plan.clarifiedGoal.length <= 2_000
-    && boundedStrings(plan.milestones, 12)
-    && boundedStrings(plan.actions, 12)
-    && boundedStrings(plan.evidenceSuggestions, 12)
-    && boundedStrings(plan.goalLinks, 12)
-    && typeof plan.notes === 'string'
-    && plan.notes.length <= 4_000
+const hasUniqueSuggestionIds = (value: unknown[]) => {
+  const ids = value.flatMap(item => isRecord(item) && typeof item.id === 'string' ? [item.id] : [])
+  return ids.length === value.length && new Set(ids).size === ids.length
+}
+
+function validateClarification(value: unknown): value is AiClarification {
+  if (!isRecord(value) || !exactKeys(value, ['goalId', 'question'])) return false
+  if (typeof value.goalId !== 'string' || typeof value.question !== 'string') return false
+  if (!boundedString(value.goalId, 128) || !boundedString(value.question, 360)) return false
+  return Boolean(value.goalId) === Boolean(value.question.trim())
+}
+
+export function validateAiResult(action: AiAction, value: unknown): value is AiResult {
+  if (!isRecord(value)) return false
+  if (action === 'today') {
+    return exactKeys(value, ['clarification', 'kind', 'suggestions'])
+      && value.kind === 'today'
+      && Array.isArray(value.suggestions)
+      && value.suggestions.length <= 3
+      && value.suggestions.every(validateSuggestion)
+      && hasUniqueSuggestionIds(value.suggestions)
+      && validateClarification(value.clarification)
+      && (value.suggestions.length > 0 || Boolean(value.clarification.question))
+  }
+  if (action === 'plan') {
+    return exactKeys(value, ['clarification', 'clarifiedGoal', 'evidenceSuggestions', 'goalId', 'goalLinks', 'kind', 'milestones', 'notes', 'suggestions'])
+      && value.kind === 'plan'
+      && boundedString(value.goalId, 128, false)
+      && boundedString(value.clarifiedGoal, 500, false)
+      && boundedStrings(value.milestones, 10, 500)
+      && Array.isArray(value.suggestions)
+      && value.suggestions.length <= 3
+      && value.suggestions.every(validateSuggestion)
+      && hasUniqueSuggestionIds(value.suggestions)
+      && boundedStrings(value.evidenceSuggestions, 8, 500)
+      && Array.isArray(value.goalLinks)
+      && value.goalLinks.length <= 8
+      && value.goalLinks.every(item => isRecord(item)
+        && exactKeys(item, ['goalId', 'reason'])
+        && boundedString(item.goalId, 128, false)
+        && boundedString(item.reason, 360, false))
+      && boundedString(value.notes, 1_500)
+      && validateClarification(value.clarification)
+  }
+  return exactKeys(value, ['highlights', 'kind', 'nextFocus', 'summary'])
+    && value.kind === action
+    && boundedString(value.summary, 1_500, false)
+    && boundedStrings(value.highlights, 8, 500)
+    && boundedString(value.nextFocus, 600)
 }
 
 function validateUsage(value: unknown): value is AiUsage {
-  if (!value || typeof value !== 'object') return false
-  const usage = value as Record<string, unknown>
-  return Number.isSafeInteger(usage.input_tokens)
-    && (usage.input_tokens as number) >= 0
-    && Number.isSafeInteger(usage.output_tokens)
-    && (usage.output_tokens as number) >= 0
+  if (!isRecord(value)) return false
+  return Number.isSafeInteger(value.input_tokens)
+    && Number(value.input_tokens) >= 0
+    && Number.isSafeInteger(value.output_tokens)
+    && Number(value.output_tokens) >= 0
 }
 
 const statusMessage = (status: number) => {
@@ -100,20 +183,21 @@ const statusMessage = (status: number) => {
   if (status === 401 || status === 403) return 'AI authentication failed. Check the server configuration.'
   if (status === 429) return 'AI is temporarily rate limited.'
   if (status === 504) return 'AI request timed out.'
+  if (status === 502) return 'AI returned an unusable response. Try again.'
   if (status >= 400 && status < 500) return 'AI request was rejected.'
   return 'AI is unavailable right now.'
 }
 
 export async function aiRequest(
-  action: 'plan' | 'today' | 'week' | 'recap',
+  action: AiAction,
   context: unknown,
   options: { signal?: AbortSignal; timeoutMs?: number } = {},
 ): Promise<AiResponse> {
   if (options.signal?.aborted) throw new DOMException('Request canceled.', 'AbortError')
   const controller = new AbortController()
   let timedOut = false
-  const timeoutMs = Number.isFinite(options.timeoutMs) && (options.timeoutMs as number) >= 0
-    ? options.timeoutMs as number
+  const timeoutMs = Number.isFinite(options.timeoutMs) && Number(options.timeoutMs) >= 0
+    ? Number(options.timeoutMs)
     : 20_000
   const timeout = globalThis.setTimeout(() => {
     timedOut = true
@@ -137,16 +221,11 @@ export async function aiRequest(
     } catch {
       throw new Error('AI returned an unreadable response.')
     }
-    if (!body || typeof body !== 'object') throw new Error('AI returned an invalid response.')
-    const payload = body as Record<string, unknown>
-    if (!validatePlan(payload.output)) throw new Error('AI returned an invalid response.')
-    const usage = validateUsage(payload.usage)
-      ? { input_tokens: payload.usage.input_tokens, output_tokens: payload.usage.output_tokens }
+    if (!isRecord(body) || !validateAiResult(action, body.output)) throw new Error('AI returned an invalid response.')
+    const usage = validateUsage(body.usage)
+      ? { input_tokens: body.usage.input_tokens, output_tokens: body.usage.output_tokens }
       : undefined
-    return {
-      output: payload.output,
-      ...(usage ? { usage } : {}),
-    }
+    return { output: body.output, ...(usage ? { usage } : {}) }
   } catch (error) {
     if (timedOut) throw new Error('AI request timed out.')
     if (options.signal?.aborted) throw new DOMException('Request canceled.', 'AbortError')

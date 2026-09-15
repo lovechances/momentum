@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { validateBackup } from './backup'
-import { migrateSnapshot } from './migrations'
+import { confirmProgressLinkSuggestion, migrateSnapshot, progressLinkCompletionPreview } from './migrations'
 import { createInitialData } from './seed'
+import { deadlineCorrectionPreview, recordProgressInData } from './goals'
+import { evidenceTrackKey, reconcileSchedule } from './scheduler'
 
 const fixed = new Date(2026, 8, 14, 12)
 
@@ -132,7 +134,7 @@ describe('first-run data and resilient migration', () => {
     expect(migrated.evidence[1]).toMatchObject({ goalId: first.id, scheduleId: undefined, milestoneId: undefined })
     expect(migrated.evidence[2]).toMatchObject({ goalId: undefined, scheduleId: undefined, milestoneId: undefined })
     expect(migrated.periods).toEqual([])
-    expect(validateBackup({ schema: 2, exportedAt: '2026-09-14T16:00:00.000Z', data: migrated })).toBe(true)
+    expect(validateBackup({ schema: 3, exportedAt: '2026-09-14T16:00:00.000Z', data: migrated })).toBe(true)
   })
 
   it('does not re-seed goals or routines into an intentionally empty saved snapshot', () => {
@@ -140,5 +142,203 @@ describe('first-run data and resilient migration', () => {
     const migrated = migrateSnapshot({ ...initial, goals: [], routines: [] }, fixed)
     expect(migrated.goals).toEqual([])
     expect(migrated.routines).toEqual([])
+  })
+
+  it('migrates a populated schema-2 snapshot idempotently without changing user records', () => {
+    const initial = createInitialData(fixed)
+    const selected = [initial.goals[0], initial.goals[6], initial.goals[11], initial.goals[3], initial.goals[5], initial.goals[9], initial.goals[12], initial.goals[1], initial.goals[8]]
+    const goals = selected.map(goal => {
+      const { measurementHistoryId: _history, deadlineAnchor: _anchor, deadlineProvenance: _provenance, contextNotes: _context, ...legacy } = goal
+      const evidenceSchedules = goal.id === initial.goals[3].id
+        ? [{ id: `${goal.id}-screenshot`, kind: 'screenshot' as const, cadence: 'monthly' as const, active: true }]
+        : goal.id === initial.goals[1].id || goal.id === initial.goals[8].id
+          ? []
+          : goal.evidenceSchedules.map(({ historyId: _scheduleHistory, ...schedule }) => schedule)
+      return { ...legacy, deadline: goal.id === initial.goals[0].id ? '2026-10-14' : goal.deadline, evidenceSchedules }
+    })
+    const legacy = {
+      schema: 2,
+      goals,
+      tasks: [{ id: 'task', title: 'Already done', section: 'Day', done: true, kind: 'task', goalId: goals[0].id, dueDate: '2026-09-14', createdAt: '2026-09-14T13:00:00.000Z', carriedCount: 0, resolvedAt: '2026-09-14T14:00:00.000Z' }],
+      routines: [],
+      progress: [
+        { id: 'weight-one', goalId: goals[0].id, value: 142, recordedAt: '2026-09-14T15:00:00.000Z', note: 'Morning weight' },
+        { id: 'weight-two', goalId: goals[1].id, value: 143, recordedAt: '2026-09-15T15:00:00.000Z', note: 'Next day' },
+      ],
+      evidence: [{ id: 'photo', goalId: goals[0].id, kind: 'photo', capturedAt: '2026-09-14T15:02:00.000Z', note: 'Front photo', mediaId: 'media-photo' }],
+      wins: [{ id: 'win', title: 'Useful conversation', goalId: goals[0].id, createdAt: '2026-09-14T16:00:00.000Z', note: 'Follow up Friday' }],
+      periods: [
+        { id: 'month:2026-09-01', kind: 'month', start: '2026-09-01', end: '2026-09-30', availableAt: '2026-10-01', finalized: false },
+        { id: '3M:2026-07-01', kind: '3M', start: '2026-07-01', end: '2026-09-30', availableAt: '2026-10-01', finalized: false },
+        { id: '6M:2026-07-01', kind: '6M', start: '2026-07-01', end: '2026-12-31', availableAt: '2027-01-01', finalized: false },
+        { id: 'year:2026-01-01', kind: 'year', start: '2026-01-01', end: '2026-12-31', availableAt: '2027-01-01', finalized: false },
+        { id: '3M:2026-04-01', kind: '3M', start: '2026-04-01', end: '2026-06-30', availableAt: '2026-07-01', finalized: true },
+      ], settings: initial.settings, onboarded: true, updatedAt: '2026-09-15T16:00:00.000Z',
+    }
+    const migrated = migrateSnapshot(legacy, fixed)
+    expect(migrated.schema).toBe(3)
+    expect(migrated.progress.map(item => [item.id, item.recordedAt, item.value, item.note])).toEqual([
+      ['weight-one', '2026-09-14T15:00:00.000Z', 142, 'Morning weight'],
+      ['weight-two', '2026-09-15T15:00:00.000Z', 143, 'Next day'],
+    ])
+    expect(migrated.evidence[0]).toMatchObject({ id: 'photo', goalIds: [goals[0].id], mediaId: 'media-photo', recordedOn: '2026-09-14' })
+    expect(migrated.wins[0]).toMatchObject({ id: 'win', goalIds: [goals[0].id], recordedOn: '2026-09-14' })
+    expect(migrated.goals[0]).toMatchObject({ deadline: '2026-10-14', deadlineProvenance: 'legacy-unknown' })
+    expect(migrated.planning).toEqual({ anchorMonth: '2026-09-01', trackingStartedOn: '2026-09-14' })
+    expect(migrated.periods).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'month:2026-09-01', start: '2026-09-01', end: '2026-09-30', effectiveStart: '2026-09-14', anchorMonth: '2026-09-01', finalized: false }),
+      expect.objectContaining({ id: '3M:2026-04-01', start: '2026-04-01', end: '2026-06-30', finalized: true }),
+    ]))
+    expect(migrated.periods.some(period => ['3M:2026-07-01', '6M:2026-07-01', 'year:2026-01-01'].includes(period.id))).toBe(false)
+    expect(migrated.goals.find(goal => goal.id === initial.goals[1].id)?.evidenceSchedules).toMatchObject([{ kind: 'note', cadence: 'weekly', active: true }])
+    expect(migrated.goals.find(goal => goal.id === initial.goals[8].id)?.evidenceSchedules).toMatchObject([{ kind: 'note', cadence: 'weekly', active: true }])
+    expect(migrated.goals.find(goal => goal.id === initial.goals[3].id)?.evidenceSchedules).toMatchObject([{ id: `${initial.goals[3].id}-screenshot`, kind: 'screenshot', cadence: 'monthly', active: false }])
+    expect(migrateSnapshot(migrated, fixed)).toEqual(migrated)
+
+    const reconciled = reconcileSchedule(migrated, '2026-09-14')
+    expect(reconciled.periods).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: '3M:2026-09-01', start: '2026-09-01', end: '2026-11-30', effectiveStart: '2026-09-14', anchorMonth: '2026-09-01' }),
+      expect.objectContaining({ id: '6M:2026-09-01', start: '2026-09-01', end: '2027-02-28', effectiveStart: '2026-09-14', anchorMonth: '2026-09-01' }),
+      expect.objectContaining({ id: 'year:2026-09-01', start: '2026-09-01', end: '2027-08-31', effectiveStart: '2026-09-14', anchorMonth: '2026-09-01' }),
+      expect.objectContaining({ id: '3M:2026-04-01', start: '2026-04-01', end: '2026-06-30', finalized: true }),
+    ]))
+
+    const weightSuggestion = migrated.progressLinkSuggestions.find(item => item.id === 'link-suggestion:body-weight')
+    const savingsSuggestion = migrated.progressLinkSuggestions.find(item => item.id === 'link-suggestion:savings-balance')
+    expect(weightSuggestion?.status).toBe('pending')
+    expect(new Set(migrated.goals.slice(0, 3).map(goal => goal.measurementHistoryId)).size).toBe(3)
+    expect(savingsSuggestion?.goalIds).not.toContain(initial.goals[12].id)
+
+    const reminderGoal = migrated.goals.find(goal => goal.id === weightSuggestion!.goalIds[0])!
+    const reminderSchedule = reminderGoal.evidenceSchedules.find(schedule => schedule.kind === 'number')!
+    const oldTrackId = evidenceTrackKey({ goal: reminderGoal, schedule: reminderSchedule })
+    const withHandledReminder = {
+      ...migrated,
+      reminderOccurrences: [{
+        id: `evidence:${oldTrackId}:2026-09-14`,
+        trackId: oldTrackId,
+        scheduleId: reminderSchedule.id,
+        dueDate: '2026-09-14',
+        status: 'snoozed' as const,
+        snoozedUntil: '2026-09-20',
+      }],
+    }
+    const linked = confirmProgressLinkSuggestion(withHandledReminder, weightSuggestion!.id)
+    expect(new Set(linked.goals.slice(0, 3).map(goal => goal.measurementHistoryId))).toEqual(new Set(['measurement:shared:body-weight']))
+    expect(linked.progress.map(item => item.id)).toEqual(['weight-one', 'weight-two'])
+    expect(new Set(linked.progress.map(item => item.historyId))).toEqual(new Set(['measurement:shared:body-weight']))
+    const linkedGoal = linked.goals.find(goal => goal.id === reminderGoal.id)!
+    const linkedSchedule = linkedGoal.evidenceSchedules.find(schedule => schedule.id === reminderSchedule.id)!
+    const newTrackId = evidenceTrackKey({ goal: linkedGoal, schedule: linkedSchedule })
+    expect(linked.reminderOccurrences).toEqual([expect.objectContaining({
+      id: `evidence:${newTrackId}:2026-09-14`,
+      trackId: newTrackId,
+      status: 'snoozed',
+      snoozedUntil: '2026-09-20',
+    })])
+    expect(confirmProgressLinkSuggestion(linked, weightSuggestion!.id)).toEqual(linked)
+  })
+
+  it('requires explicit confirmation before a shared history can complete a target', () => {
+    const initial = createInitialData(fixed)
+    const selected = initial.goals.filter(goal => goal.unit === 'lbs').slice(0, 2)
+    const snapshot = {
+      ...initial,
+      goals: initial.goals.map(goal => selected.some(item => item.id === goal.id)
+        ? { ...goal, baseline: 130, current: 130, direction: 'increase' as const, createdAt: '2026-09-01T12:00:00.000Z' }
+        : goal),
+      progress: [{
+        id: 'weight-on-selected-date',
+        goalId: selected[0].id,
+        historyId: selected[0].measurementHistoryId,
+        value: 145,
+        recordedAt: '2026-09-16T15:00:00.000Z',
+        recordedOn: '2026-09-10',
+      }],
+    }
+    const suggestion = snapshot.progressLinkSuggestions.find(item => item.id === 'link-suggestion:body-weight')!
+    const selectedGoalIds = selected.map(goal => goal.id)
+
+    expect(confirmProgressLinkSuggestion(snapshot, suggestion.id, selectedGoalIds)).toBe(snapshot)
+
+    const linked = confirmProgressLinkSuggestion(snapshot, suggestion.id, selectedGoalIds, true)
+    expect(linked.progressLinkSuggestions.find(item => item.id === suggestion.id)?.status).toBe('confirmed')
+    expect(linked.goals.find(goal => goal.id === selected[0].id)).toMatchObject({ status: 'completed', current: 145 })
+    expect(linked.goals.find(goal => goal.id === selected[1].id)).toMatchObject({ status: 'active', current: 145 })
+    expect(linked.goals.find(goal => goal.id === selected[0].id)?.history.at(-1)).toMatchObject({ action: 'completed', current: 145 })
+    expect(linked.goals.find(goal => goal.id === selected[0].id)?.history.at(-1)?.at.slice(0, 10)).toBe('2026-09-10')
+  })
+
+  it('does not complete a later-created goal from an observation that predates it', () => {
+    const initial = createInitialData(fixed)
+    const selected = initial.goals.filter(goal => goal.unit === 'lbs').slice(0, 2)
+    const snapshot = {
+      ...initial,
+      goals: initial.goals.map(goal => selected.some(item => item.id === goal.id)
+        ? { ...goal, baseline: 130, current: 130, target: 140, direction: 'increase' as const, createdAt: '2026-09-14T12:00:00.000Z' }
+        : goal),
+      progress: [{
+        id: 'pre-goal-weight', goalId: selected[0].id, historyId: selected[0].measurementHistoryId,
+        value: 145, recordedAt: '2026-09-15T12:00:00.000Z', recordedOn: '2026-09-10',
+      }],
+    }
+    const suggestion = snapshot.progressLinkSuggestions.find(item => item.id === 'link-suggestion:body-weight')!
+    const selectedGoalIds = selected.map(goal => goal.id)
+    expect(progressLinkCompletionPreview(snapshot, suggestion.id, selectedGoalIds)).toEqual([])
+    const linked = confirmProgressLinkSuggestion(snapshot, suggestion.id, selectedGoalIds)
+    expect(linked.goals.filter(goal => selectedGoalIds.includes(goal.id)).every(goal => goal.status === 'active')).toBe(true)
+  })
+
+  it('repoints a newer goal that already uses a history included in a confirmed merge', () => {
+    const initial = createInitialData(fixed)
+    const selected = initial.goals.filter(goal => goal.unit === 'lbs').slice(0, 2)
+    const oldHistoryId = selected[0].measurementHistoryId!
+    const newerGoal = {
+      ...selected[1],
+      id: 'newer-linked-goal',
+      title: 'Later weight target',
+      target: 180,
+      baseline: 143,
+      current: 143,
+      measurementHistoryId: oldHistoryId,
+      evidenceSchedules: [{ id: 'newer-weekly', kind: 'number' as const, cadence: 'weekly' as const, historyId: oldHistoryId, active: true }],
+      createdAt: '2026-09-14T12:00:00.000Z',
+    }
+    const snapshot = {
+      ...initial,
+      goals: [...initial.goals, newerGoal],
+      progress: [{ id: 'existing-weight', goalId: selected[0].id, historyId: oldHistoryId, value: 143, recordedAt: '2026-09-14T12:00:00.000Z', recordedOn: '2026-09-14' }],
+    }
+    const suggestion = snapshot.progressLinkSuggestions.find(item => item.id === 'link-suggestion:body-weight')!
+    expect(suggestion.goalIds).not.toContain(newerGoal.id)
+
+    const linked = confirmProgressLinkSuggestion(snapshot, suggestion.id)
+    const canonicalId = 'measurement:shared:body-weight'
+    expect(linked.goals.find(goal => goal.id === newerGoal.id)).toMatchObject({
+      measurementHistoryId: canonicalId,
+      current: 143,
+      evidenceSchedules: [expect.objectContaining({ historyId: canonicalId })],
+    })
+    expect(linked.progressLinkSuggestions.find(item => item.id === suggestion.id)?.goalIds).toContain(newerGoal.id)
+
+    const updated = recordProgressInData(linked, {
+      id: 'next-weight', goalId: newerGoal.id, historyId: canonicalId, value: 145,
+      recordedAt: '2026-09-15T12:00:00.000Z', recordedOn: '2026-09-15',
+    })
+    expect(updated.goals.find(goal => goal.id === newerGoal.id)?.current).toBe(145)
+  })
+
+  it('preserves approved goal context notes in schema 3', () => {
+    const initial = createInitialData(fixed)
+    initial.goals[0] = { ...initial.goals[0], contextNotes: ['Main unfinished part: deployment validation.'] }
+    expect(migrateSnapshot(initial, fixed).goals[0].contextNotes).toEqual(['Main unfinished part: deployment validation.'])
+  })
+
+  it('classifies a non-default legacy deadline as manual instead of offering to overwrite it', () => {
+    const initial = createInitialData(fixed)
+    const { deadlineAnchor: _anchor, deadlineProvenance: _provenance, ...legacyGoal } = initial.goals[0]
+    const migrated = migrateSnapshot({ ...initial, schema: 2, goals: [{ ...legacyGoal, deadline: '2026-10-20' }] }, fixed)
+    expect(migrated.goals[0]).toMatchObject({ deadline: '2026-10-20', deadlineProvenance: 'manual' })
+    expect(deadlineCorrectionPreview(migrated)).toEqual([])
   })
 })
