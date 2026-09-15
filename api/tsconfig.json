@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ESNext"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "allowSyntheticDefaultImports": true,
+    "types": ["node"],
+    "strict": true,
+    "skipLibCheck": true,
+    "incremental": false,
+    "composite": false,
+    "noEmit": true
+  },
+  "include": ["ai.ts"],
+  "exclude": ["*.test.ts", "*.test.tsx"]
+}

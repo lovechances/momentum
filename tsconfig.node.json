@@ -12,6 +12,5 @@
     "composite": false,
     "noEmit": true
   },
-  "include": ["vite.config.ts", "api/**/*.ts"],
-  "exclude": ["api/**/*.test.ts", "api/**/*.test.tsx"]
+  "include": ["vite.config.ts"]
 }

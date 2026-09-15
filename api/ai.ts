@@ -1,5 +1,38 @@
-import { AI_MAX_CONTEXT_CHARACTERS, AI_MAX_OUTPUT_TOKENS, AI_MODEL } from '../src/ai-config'
-import { validatePlan } from '../src/ai'
+// Keep this Vercel entrypoint runtime-self-contained. Vercel transpiles traditional
+// /api functions without bundling their local ESM imports, so a local dependency
+// can survive into /var/task as an unresolved Node import.
+export const AI_MODEL = 'gpt-5.4-nano'
+export const AI_MAX_OUTPUT_TOKENS = 800
+export const AI_MAX_CONTEXT_CHARACTERS = 12_000
+
+export type AiPlan = {
+  clarifiedGoal: string
+  milestones: string[]
+  actions: string[]
+  evidenceSuggestions: string[]
+  goalLinks: string[]
+  notes: string
+}
+
+const boundedStrings = (value: unknown, maxItems: number) => Array.isArray(value)
+  && value.length <= maxItems
+  && value.every(item => typeof item === 'string' && item.length <= 1_000)
+
+const planKeys = ['actions', 'clarifiedGoal', 'evidenceSuggestions', 'goalLinks', 'milestones', 'notes']
+
+export function validatePlan(value: unknown): value is AiPlan {
+  if (!value || typeof value !== 'object') return false
+  const plan = value as Record<string, unknown>
+  return Object.keys(plan).sort().join('|') === planKeys.join('|')
+    && typeof plan.clarifiedGoal === 'string'
+    && plan.clarifiedGoal.length <= 2_000
+    && boundedStrings(plan.milestones, 12)
+    && boundedStrings(plan.actions, 12)
+    && boundedStrings(plan.evidenceSuggestions, 12)
+    && boundedStrings(plan.goalLinks, 12)
+    && typeof plan.notes === 'string'
+    && plan.notes.length <= 4_000
+}
 
 const actions = new Set(['plan', 'today', 'week', 'recap'] as const)
 const upstreamUrl = 'https://api.openai.com/v1/responses'
@@ -61,8 +94,7 @@ function isTimeout(error: unknown) {
   return error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')
 }
 
-// Vercel serverless function. OPENAI_API_KEY is never exposed to the PWA bundle.
-export default async function handler(req: any, res: any) {
+async function handleRequest(req: any, res: any) {
   res.setHeader?.('cache-control', 'no-store')
   if (req.method !== 'POST') {
     res.setHeader?.('allow', 'POST')
@@ -141,5 +173,22 @@ export default async function handler(req: any, res: any) {
   } catch (error) {
     if (isTimeout(error)) return res.status(504).json({ error: 'AI request timed out.' })
     return res.status(502).json({ error: 'AI request failed.' })
+  }
+}
+
+// Vercel serverless function. OPENAI_API_KEY is never exposed to the PWA bundle.
+// This outer boundary also covers request parsing/validation errors that happen
+// before the upstream OpenAI request begins.
+export default async function handler(req: any, res: any) {
+  try {
+    return await handleRequest(req, res)
+  } catch (error) {
+    if (res.headersSent) {
+      if (!res.writableEnded) res.end?.()
+      return
+    }
+    res.setHeader?.('cache-control', 'no-store')
+    if (isTimeout(error)) return res.status(504).json({ error: 'AI request timed out.' })
+    return res.status(500).json({ error: 'AI request failed.' })
   }
 }

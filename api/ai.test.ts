@@ -1,7 +1,18 @@
+import { readFile } from 'node:fs/promises'
+import ts from 'typescript'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import handler from './ai'
-import { aiRequest } from '../src/ai'
-import { AI_MAX_CONTEXT_CHARACTERS, AI_MAX_OUTPUT_TOKENS, AI_MODEL } from '../src/ai-config'
+import handler, {
+  AI_MAX_CONTEXT_CHARACTERS,
+  AI_MAX_OUTPUT_TOKENS,
+  AI_MODEL,
+  validatePlan as validateServerPlan,
+} from './ai'
+import { aiRequest, validatePlan as validateClientPlan } from '../src/ai'
+import {
+  AI_MAX_CONTEXT_CHARACTERS as CLIENT_MAX_CONTEXT_CHARACTERS,
+  AI_MAX_OUTPUT_TOKENS as CLIENT_MAX_OUTPUT_TOKENS,
+  AI_MODEL as CLIENT_MODEL,
+} from '../src/ai-config'
 
 const validPlan = {
   clarifiedGoal: 'Ship a small release',
@@ -70,6 +81,36 @@ describe('serverless AI boundary', () => {
     vi.restoreAllMocks()
   })
 
+  it('emits a self-contained Node ESM entry that loads without resolving local modules', async () => {
+    const source = await readFile(new URL('./ai.ts', import.meta.url), 'utf8')
+    const emitted = ts.transpileModule(source, {
+      compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
+      fileName: 'api/ai.ts',
+      reportDiagnostics: true,
+    })
+    const errors = emitted.diagnostics?.filter(diagnostic => diagnostic.category === ts.DiagnosticCategory.Error) ?? []
+    expect(errors).toEqual([])
+    expect(emitted.outputText).not.toMatch(/(?:from\s*|import\s*\()\s*['"]\.{1,2}\//)
+
+    const dataUrl = `data:text/javascript;base64,${Buffer.from(emitted.outputText).toString('base64')}`
+    const deployedModule = await import(/* @vite-ignore */ dataUrl)
+    expect(deployedModule.default).toBeTypeOf('function')
+  })
+
+  it('keeps the server contract aligned with the public client configuration', () => {
+    expect({
+      model: AI_MODEL,
+      maxContextCharacters: AI_MAX_CONTEXT_CHARACTERS,
+      maxOutputTokens: AI_MAX_OUTPUT_TOKENS,
+    }).toEqual({
+      model: CLIENT_MODEL,
+      maxContextCharacters: CLIENT_MAX_CONTEXT_CHARACTERS,
+      maxOutputTokens: CLIENT_MAX_OUTPUT_TOKENS,
+    })
+    expect(validateServerPlan(validPlan)).toBe(true)
+    expect(validateClientPlan(validPlan)).toBe(true)
+  })
+
   it('allows only POST and marks every response as non-cacheable', async () => {
     const result = await callHandler(undefined, 'GET')
     expect(result).toMatchObject({ status: 405, ended: true })
@@ -102,6 +143,23 @@ describe('serverless AI boundary', () => {
     context.self = context
     const result = await callHandler({ action: 'plan', context })
     expect(result.status).toBe(400)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('sanitizes an unexpected application failure across the whole handler boundary', async () => {
+    const privateDetail = 'private application detail that must not escape'
+    const request = { method: 'POST' } as { method: string; body: unknown }
+    Object.defineProperty(request, 'body', { get: () => { throw new Error(privateDetail) } })
+    const { response, result } = responseHarness()
+
+    await handler(request, response)
+
+    expect(result).toMatchObject({
+      status: 500,
+      body: { error: 'AI request failed.' },
+      headers: { 'cache-control': 'no-store' },
+    })
+    expect(JSON.stringify(result.body)).not.toContain(privateDetail)
     expect(fetchMock).not.toHaveBeenCalled()
   })
 

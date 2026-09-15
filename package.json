@@ -8,9 +8,10 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "npm run typecheck && vite build",
+    "build": "npm run typecheck && npm run check:api && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit && tsc -p api/tsconfig.json --noEmit",
+    "check:api": "vitest run api/ai.test.ts",
     "test": "vitest run",
     "lint": "eslint src api --ext .ts,.tsx"
   },
