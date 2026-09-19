@@ -307,7 +307,7 @@ export function useMomentumApp() {
     }),
     markRestDay: (date: string, rest: boolean) => update(source => ({ ...source, tasks: source.tasks.map(task => task.dueDate === date ? { ...task, lightDay: rest } : task) })),
     updateGoal: (goal: Goal) => update(source => ({ ...source, goals: source.goals.map(item => item.id === goal.id ? goal : item) })),
-    editGoal: (id: string, changes: { title: string; nextAction?: string }) => update(source => ({ ...source, goals: source.goals.map(goal => goal.id === id ? editGoalDetails(goal, changes) : goal) })),
+    editGoal: (id: string, changes: { title: string; nextAction?: string; target?: number }) => update(source => ({ ...source, goals: source.goals.map(goal => goal.id === id ? editGoalDetails(goal, changes) : goal) })),
     pauseGoal: (id: string) => update(source => ({ ...source, goals: source.goals.map(goal => goal.id === id ? markGoalPaused(goal) : goal) })),
     resumeGoal: (id: string) => update(source => ({ ...source, goals: source.goals.map(goal => goal.id === id ? markGoalResumed(goal) : goal) })),
     completeGoal: (id: string) => update(source => ({ ...source, goals: source.goals.map(goal => goal.id === id ? markGoalComplete(goal) : goal) })),

@@ -51,6 +51,7 @@ import {
   deadlineCorrectionPreview,
   deadlineFor,
   editGoalDetails,
+  goalProgressPercent,
   isDeadlineReviewDue,
   pauseGoal,
   planningAnchorFor,
@@ -514,10 +515,12 @@ describe('calendar scheduler', () => {
     expect(dueEvidence([near, separate], [], '2026-09-14')).toHaveLength(2)
   })
 
-  it('does not silently merge seeded histories before confirmation', () => {
+  it('seeds shared Weight and Savings histories without duplicating reminders', () => {
     const seeded = seededGoals(new Date(2026, 8, 14, 12))
     const due = dueEvidence(seeded, [], '2026-09-14')
-    expect(due).toHaveLength(11)
+    expect(due).toHaveLength(3)
+    expect(new Set(seeded.filter(goal => goal.unit === 'lbs').map(goal => goal.measurementHistoryId))).toEqual(new Set(['measurement:shared:body-weight']))
+    expect(new Set(seeded.filter(goal => goal.unit === 'USD' && goal.title.includes('stacked')).map(goal => goal.measurementHistoryId))).toEqual(new Set(['measurement:shared:savings-balance']))
   })
 
   it('lets one capture advance every related horizon without hiding unrelated measurements', () => {
@@ -734,6 +737,29 @@ describe('goal lifecycle', () => {
     const created = createGoal({ title: ' $10k stacked ', horizon: '3M', baseline: 0, target: 10_000, createdAt: iso('2026-09-14') })
     expect(created).toMatchObject({ title: '$10k stacked', kind: 'numeric', baseline: 0, current: 0, direction: 'increase', deadline: '2026-12-01', deadlineAnchor: '2026-09-01', deadlineProvenance: 'calendar-default' })
     expect(created.history[0].at).toBe(iso('2026-09-14'))
+  })
+
+  it('edits a numeric target independently from shared observations and preserves custom titles', () => {
+    const generated = goal({ title: '140 lbs clean', target: 140, current: 132, baseline: 130, unit: 'lbs', measurementHistoryId: 'measurement:shared:body-weight' })
+    const edited = editGoalDetails(generated, { title: generated.title, nextAction: generated.nextAction, target: 135 }, iso('2026-09-18'))
+    expect(edited).toMatchObject({ title: '135 lbs clean', target: 135, current: 132, baseline: 130, measurementHistoryId: 'measurement:shared:body-weight' })
+    expect(edited.history.at(-1)).toMatchObject({ action: 'adjusted', current: 132, target: 135 })
+    expect(goalProgressPercent(edited)).toBeCloseTo(40)
+
+    const custom = editGoalDetails({ ...generated, title: 'Near-term weight checkpoint' }, { title: 'Near-term weight checkpoint', target: 135 }, iso('2026-09-18'))
+    expect(custom.title).toBe('Near-term weight checkpoint')
+    expect(custom.target).toBe(135)
+    expect(editGoalDetails(generated, { title: 'Emergency fund checkpoint', target: 135 })).toMatchObject({ title: 'Emergency fund checkpoint', target: 135 })
+    expect(editGoalDetails(custom, { title: '135 lbs clean', target: custom.target })).toMatchObject({ title: '135 lbs clean', target: 135, measurementHistoryId: 'measurement:shared:body-weight' })
+
+    const titleOnly = editGoalDetails(generated, { title: '135 lbs clean' }, iso('2026-09-18'))
+    expect(titleOnly.target).toBe(140)
+    expect(titleOnly.current).toBe(132)
+
+    const savings = goal({ id: 'savings-1m', title: '$7k stacked', unit: 'USD', target: 7000, current: 2900, baseline: 1000, measurementHistoryId: 'measurement:shared:savings-balance' })
+    const savingsEdited = editGoalDetails(savings, { title: savings.title, target: 5000 }, iso('2026-09-18'))
+    expect(savingsEdited).toMatchObject({ title: '$5k stacked', target: 5000, current: 2900, measurementHistoryId: 'measurement:shared:savings-balance' })
+    expect(savingsEdited.history).toHaveLength(savings.history.length + 1)
   })
 
   it('adds numeric goals with an explicit history and non-spam capture defaults', () => {

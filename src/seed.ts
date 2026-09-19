@@ -24,6 +24,12 @@ const goalSeed: Array<[string, Horizon, string | undefined, GoalKind, 'active' |
   ['Sports car in cash', '2Y', 'Money', 'milestone', 'active'],
 ]
 
+const sharedSeedMeasurementFor = (id: string) => {
+  if (['seed-goal-1', 'seed-goal-7', 'seed-goal-12', 'seed-goal-16'].includes(id)) return 'measurement:shared:body-weight'
+  if (['seed-goal-4', 'seed-goal-6', 'seed-goal-10'].includes(id)) return 'measurement:shared:savings-balance'
+  return undefined
+}
+
 const targetFromTitle = (title: string) => {
   if (title === '$7k stacked') return 7_000
   if (title === '$10k stacked') return 10_000
@@ -60,7 +66,7 @@ export function seededGoals(createdAt = new Date()): Goal[] {
       // unknown. Keep the status without inventing a completion event for Recap.
       history: [{ at: created, action: 'created', target, deadline: deadlineFor(horizon, createdAt) }],
       evidenceSchedules: [],
-      measurementHistoryId: kind === 'numeric' ? `measurement:${id}` : undefined,
+      measurementHistoryId: kind === 'numeric' ? sharedSeedMeasurementFor(id) ?? `measurement:${id}` : undefined,
       createdAt: created,
     }
     return { ...goal, evidenceSchedules: status === 'active' ? defaultEvidenceSchedulesForGoal(goal) : [] }
@@ -79,27 +85,33 @@ export function seededRoutines(createdAt = now()): Routine[] {
 export function createInitialData(date = new Date()): AppData {
   const created = date.toISOString()
   const goals = seededGoals(date)
-  const measurementHistories: MeasurementHistory[] = goals.filter(goal => goal.kind === 'numeric').map(goal => ({
-    id: progressHistoryId(goal),
-    label: goal.unit === 'lbs' ? 'Weight' : /stacked/i.test(goal.title) ? 'Savings' : goal.title,
-    unit: goal.unit,
-    semanticKey: goal.unit === 'lbs' ? 'body-weight' : /stacked/i.test(goal.title) ? 'savings-balance' : undefined,
-    scopeKey: goal.unit === 'lbs' ? 'body' : /stacked/i.test(goal.title) ? 'primary-savings-pool' : undefined,
-    createdAt: goal.createdAt,
-  }))
+  const measurementHistories: MeasurementHistory[] = [...new Map(goals.filter(goal => goal.kind === 'numeric').map(goal => {
+    const semantic = goal.unit === 'lbs' ? { label: 'Weight', semanticKey: 'body-weight' as const, scopeKey: 'body' }
+      : /stacked/i.test(goal.title) ? { label: 'Savings', semanticKey: 'savings-balance' as const, scopeKey: 'primary-savings-pool' }
+        : undefined
+    return [progressHistoryId(goal), {
+      id: progressHistoryId(goal),
+      label: semantic?.label ?? goal.title,
+      unit: goal.unit,
+      semanticKey: semantic?.semanticKey,
+      scopeKey: semantic?.scopeKey,
+      createdAt: goal.createdAt,
+    } satisfies MeasurementHistory]
+  })).values()]
   const suggestionCandidates = [
     { id: 'link-suggestion:body-weight', label: 'Weight', goalIds: goals.filter(goal => goal.kind === 'numeric' && goal.unit?.toLowerCase() === 'lbs' && /(?:lbs|weight)/i.test(goal.title)).map(goal => goal.id) },
     { id: 'link-suggestion:savings-balance', label: 'Savings', goalIds: goals.filter(goal => goal.kind === 'numeric' && goal.unit?.toUpperCase() === 'USD' && /(?:stacked|savings?)/i.test(goal.title)).map(goal => goal.id) },
   ]
   const suggestions: ProgressLinkSuggestion[] = suggestionCandidates.filter(item => item.goalIds.length > 1).map(item => ({
     ...item,
-    historyIds: item.goalIds.map(goalId => `measurement:${goalId}`),
-    status: 'pending' as const,
+    historyIds: item.goalIds.map(goalId => goals.find(goal => goal.id === goalId)?.measurementHistoryId ?? `measurement:${goalId}`),
+    status: 'confirmed' as const,
     createdAt: created,
   }))
   const trackingStartedOn = todayLocal(date)
   return {
     schema: 3,
+    measurementSharingVersion: 1,
     goals, tasks: [], routines: seededRoutines(created), evidence: [], wins: [], progress: [],
     measurementHistories,
     progressLinkSuggestions: suggestions,

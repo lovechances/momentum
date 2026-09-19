@@ -171,6 +171,57 @@ function semanticGroup(goal: Goal) {
   return undefined
 }
 
+const seededSharedGroups: Array<{ id: 'body-weight' | 'savings-balance'; label: string; unit: string; scopeKey: string; goalIds: Set<string> }> = [
+  { id: 'body-weight', label: 'Weight', unit: 'lbs', scopeKey: 'body', goalIds: new Set(['seed-goal-1', 'seed-goal-7', 'seed-goal-12', 'seed-goal-16']) },
+  { id: 'savings-balance', label: 'Savings', unit: 'USD', scopeKey: 'primary-savings-pool', goalIds: new Set(['seed-goal-4', 'seed-goal-6', 'seed-goal-10']) },
+]
+
+/** Upgrade only the old built-in seed histories; custom/separately chosen histories are left alone. */
+function normalizeSeedMeasurementSharing(data: AppData): AppData {
+  let next = data
+  for (const group of seededSharedGroups) {
+    const goals = next.goals.filter(goal => goal.kind === 'numeric' && group.goalIds.has(goal.id))
+    const historyIds = new Set(goals.map(progressHistoryId))
+    const canonicalId = `measurement:shared:${group.id}`
+    const oldHistoryIds = new Set([...historyIds].filter(id => id !== canonicalId))
+    if (goals.length < 2 || oldHistoryIds.size === 0 || [...oldHistoryIds].some(id => !id.startsWith('measurement:seed-goal-'))) continue
+    const latest = next.progress
+      .filter(entry => oldHistoryIds.has(entry.historyId ?? `measurement:${entry.goalId}`))
+      .sort(compareProgressEntries)
+      .at(-1)
+    const goalsAfter = next.goals.map(goal => {
+      if (!group.goalIds.has(goal.id)) return goal
+      return {
+        ...goal,
+        measurementHistoryId: canonicalId,
+        current: latest?.value ?? goal.current,
+        evidenceSchedules: goal.evidenceSchedules.map(schedule => ({ ...schedule, historyId: canonicalId })),
+      }
+    })
+    const trackChanges = new Map<string, string>()
+    for (const goal of goals) {
+      const updated = goalsAfter.find(item => item.id === goal.id)!
+      for (const schedule of goal.evidenceSchedules) {
+        const revised = updated.evidenceSchedules.find(item => item.id === schedule.id)
+        if (revised) trackChanges.set(evidenceTrackKey({ goal, schedule }), evidenceTrackKey({ goal: updated, schedule: revised }))
+      }
+    }
+    const canonical: MeasurementHistory = next.measurementHistories.find(item => item.id === canonicalId) ?? {
+      id: canonicalId, label: group.label, unit: group.unit, semanticKey: group.id, scopeKey: group.scopeKey, createdAt: goals.map(goal => goal.createdAt).sort()[0],
+    }
+    next = {
+      ...next,
+      goals: goalsAfter,
+      measurementHistories: unique([canonical, ...next.measurementHistories.map(history => oldHistoryIds.has(history.id) ? { ...history, mergedIntoId: canonicalId } : history)]),
+      progress: next.progress.map(entry => oldHistoryIds.has(entry.historyId ?? `measurement:${entry.goalId}`) ? { ...entry, historyId: canonicalId } : entry),
+      evidence: next.evidence.map(item => item.historyId && oldHistoryIds.has(item.historyId) ? { ...item, historyId: canonicalId } : item),
+      reminderOccurrences: remapEvidenceReminderOccurrences(next.reminderOccurrences, trackChanges),
+      progressLinkSuggestions: next.progressLinkSuggestions.map(item => item.id === `link-suggestion:${group.id}` ? { ...item, status: 'confirmed', goalIds: goals.map(goal => goal.id), historyIds: [canonicalId] } : item),
+    }
+  }
+  return next
+}
+
 function addLegacyScheduleDefaults(goal: Goal) {
   if (goal.status !== 'active') return goal
   const schedules = goal.evidenceSchedules.length ? goal.evidenceSchedules : defaultEvidenceSchedulesForGoal(goal)
@@ -304,14 +355,16 @@ export function migrateSnapshot(value: unknown, date = new Date()): AppData {
   const suggestions = Array.isArray(source.progressLinkSuggestions)
     ? unique(source.progressLinkSuggestions.map(normalizeSuggestion).filter((item): item is ProgressLinkSuggestion => Boolean(item)).map(item => ({ ...item, goalIds: item.goalIds.filter(id => goalIds.has(id)), historyIds: item.historyIds.filter(id => historyIds.has(id)) })))
     : suggestedLinks(goals, fallbackAt)
-  return reconcileEvidenceReminderPolicy({
+  const migrated: AppData = {
     schema: 3,
+    measurementSharingVersion: 1,
     goals, tasks, routines, evidence, wins, progress, measurementHistories,
     progressLinkSuggestions: suggestions,
     routineExclusions, reminderOccurrences, planning, periods, settings,
     onboarded: Boolean(source.onboarded),
     updatedAt: isTimestamp(source.updatedAt) ? source.updatedAt : fallbackAt,
-  }, todayLocal(date))
+  }
+  return reconcileEvidenceReminderPolicy(legacy || source.measurementSharingVersion === 1 ? migrated : normalizeSeedMeasurementSharing(migrated), todayLocal(date))
 }
 
 function progressLinkState(data: AppData, suggestionId: string, selectedGoalIds?: string[]) {
@@ -345,6 +398,9 @@ export function confirmProgressLinkSuggestion(data: AppData, suggestionId: strin
   const state = progressLinkState(data, suggestionId, selectedGoalIds)
   if (!state || state.suggestion.status === 'confirmed') return data
   const { suggestion, selected, goals, oldHistoryIds } = state
+  if (selected.length >= 2 && new Set(goals.map(progressHistoryId)).size === 1) {
+    return { ...data, progressLinkSuggestions: data.progressLinkSuggestions.map(item => item.id === suggestionId ? { ...item, status: 'confirmed', goalIds: goals.map(goal => goal.id), historyIds: [progressHistoryId(goals[0])] } : item) }
+  }
   if (selected.length < 2) return { ...data, progressLinkSuggestions: data.progressLinkSuggestions.map(item => item.id === suggestionId ? { ...item, status: 'dismissed' } : item) }
   const reached = progressLinkCompletionPreview(data, suggestionId, selectedGoalIds)
   if (reached.length && !confirmReached) return data

@@ -256,6 +256,14 @@ export function numericTargetReached(goal: Goal) {
   return direction === 'increase' ? goal.current >= goal.target : goal.current <= goal.target
 }
 
+/** Percent complete for the goal's own target (never derived from its title). */
+export function goalProgressPercent(goal: Pick<Goal, 'kind' | 'baseline' | 'current' | 'target'>) {
+  if (goal.kind !== 'numeric' || goal.current === undefined || goal.target === undefined || goal.baseline === undefined) return 0
+  const distance = goal.target - goal.baseline
+  if (distance === 0) return goal.current === goal.target ? 100 : 0
+  return Math.max(0, Math.min(100, ((goal.current - goal.baseline) / distance) * 100))
+}
+
 export function isGoalComplete(goal: Goal) {
   return goal.status === 'completed'
 }
@@ -319,17 +327,48 @@ export function reopenGoal(goal: Goal, at = now(), note = 'Reopened completed go
   }
 }
 
-export function editGoalDetails(goal: Goal, changes: { title: string; nextAction?: string }, at = now()): Goal {
+function generatedNumericTitleTarget(goal: Pick<Goal, 'title' | 'unit' | 'target'>) {
+  const title = goal.title.trim()
+  const match = goal.unit?.toLowerCase() === 'lbs'
+    ? title.match(/^(\d+(?:\.\d+)?)\s+lbs\s+clean$/i)
+    : goal.unit?.toUpperCase() === 'USD'
+      ? title.match(/^\$(\d+(?:\.\d+)?)k\s+stacked$/i) ?? title.match(/^\$(\d+(?:\.\d+)?)k\/mo\+\s+online$/i)
+      : goal.unit?.toLowerCase() === 'followers'
+        ? title.match(/^(\d+(?:\.\d+)?)k\+\s+on\s+platforms$/i)
+        : undefined
+  if (!match) return undefined
+  const value = Number(match[1]) * (goal.unit?.toUpperCase() === 'USD' || goal.unit?.toLowerCase() === 'followers' ? 1_000 : 1)
+  return Number.isFinite(value) ? value : undefined
+}
+
+function generatedNumericTitleFor(goal: Pick<Goal, 'title' | 'unit' | 'target'>, target: number) {
+  if (generatedNumericTitleTarget(goal) !== goal.target) return undefined
+  if (goal.unit?.toLowerCase() === 'lbs') return `${target} lbs clean`
+  const compact = (target / 1_000).toString().replace(/\.0+$/, '')
+  if (goal.unit?.toUpperCase() === 'USD' && /^\$\d+(?:\.\d+)?k\s+stacked$/i.test(goal.title.trim())) return `$${compact}k stacked`
+  if (goal.unit?.toUpperCase() === 'USD' && /^\$\d+(?:\.\d+)?k\/mo\+\s+online$/i.test(goal.title.trim())) return `$${compact}k/mo+ online`
+  if (goal.unit?.toLowerCase() === 'followers') return `${compact}k+ on platforms`
+  return undefined
+}
+
+export function editGoalDetails(goal: Goal, changes: { title: string; nextAction?: string; target?: number }, at = now()): Goal {
   const title = changes.title.trim()
   if (!title) throw new Error('A goal needs a title.')
   const nextAction = changes.nextAction?.trim() || undefined
-  if (title === goal.title && nextAction === goal.nextAction) return goal
-  const changed = [title !== goal.title ? `Renamed from “${goal.title}”` : undefined, nextAction !== goal.nextAction ? 'next action updated' : undefined].filter(Boolean).join('; ')
+  if (changes.target !== undefined && (!Number.isFinite(changes.target) || goal.kind !== 'numeric')) throw new Error('Goal target must be a finite number.')
+  const targetChanged = goal.kind === 'numeric' && changes.target !== undefined && changes.target !== goal.target
+  const target = targetChanged ? changes.target : goal.target
+  const generatedTitle = targetChanged && title === goal.title ? generatedNumericTitleFor(goal, changes.target!) : undefined
+  const nextTitle = generatedTitle ?? title
+  if (nextTitle === goal.title && nextAction === goal.nextAction && !targetChanged) return goal
+  const changed = [nextTitle !== goal.title ? `Renamed from “${goal.title}”` : undefined, targetChanged ? `Target changed to ${target}` : undefined, nextAction !== goal.nextAction ? 'next action updated' : undefined].filter(Boolean).join('; ')
   return {
     ...goal,
-    title,
+    title: nextTitle,
     nextAction,
-    history: [...goal.history, { at, action: 'adjusted', note: changed, current: goal.current, target: goal.target, deadline: goal.deadline }],
+    target,
+    direction: targetChanged ? inferredDirection(goal.baseline, target) ?? goal.direction : goal.direction,
+    history: [...goal.history, { at, action: 'adjusted', note: changed, current: goal.current, target, deadline: goal.deadline }],
   }
 }
 

@@ -6,6 +6,11 @@ import { deadlineCorrectionPreview, recordProgressInData } from './goals'
 import { evidenceTrackKey, reconcileSchedule } from './scheduler'
 
 const fixed = new Date(2026, 8, 14, 12)
+const unsharedSeededWeight = (data: ReturnType<typeof createInitialData>) => ({
+  ...data,
+  goals: data.goals.map(goal => goal.unit === 'lbs' ? { ...goal, measurementHistoryId: `measurement:${goal.id}`, evidenceSchedules: goal.evidenceSchedules.map(schedule => ({ ...schedule, historyId: `measurement:${goal.id}` })) } : goal),
+  progressLinkSuggestions: data.progressLinkSuggestions.map(item => item.id === 'link-suggestion:body-weight' ? { ...item, status: 'pending' as const } : item),
+})
 
 describe('first-run data and resilient migration', () => {
   it('seeds exactly the locked goals without fabricated current or baseline values', () => {
@@ -36,6 +41,17 @@ describe('first-run data and resilient migration', () => {
     const completedSeed = data.goals.find(goal => goal.status === 'completed')
     expect(completedSeed?.title).toBe('Progress Tracker app — completed')
     expect(completedSeed?.history.some(event => event.action === 'completed')).toBe(false)
+  })
+
+  it('seeds one shared Weight and Savings history with independent horizon targets', () => {
+    const initial = createInitialData(fixed)
+    const weight = initial.goals.filter(goal => goal.unit === 'lbs')
+    const savings = initial.goals.filter(goal => goal.unit === 'USD' && goal.title.includes('stacked'))
+    expect(new Set(weight.map(goal => goal.measurementHistoryId))).toEqual(new Set(['measurement:shared:body-weight']))
+    expect(new Set(savings.map(goal => goal.measurementHistoryId))).toEqual(new Set(['measurement:shared:savings-balance']))
+    expect(initial.measurementHistories.filter(history => history.id.startsWith('measurement:shared:'))).toHaveLength(2)
+    expect(weight.map(goal => goal.target)).toEqual([140, 150, 170, undefined])
+    expect(savings.map(goal => goal.target)).toEqual([7000, 10000, 20000])
   })
 
   it('removes the known g1/g2/g4/g6 visual-scaffold values while keeping explicit title targets', () => {
@@ -240,7 +256,7 @@ describe('first-run data and resilient migration', () => {
   })
 
   it('requires explicit confirmation before a shared history can complete a target', () => {
-    const initial = createInitialData(fixed)
+    const initial = unsharedSeededWeight(createInitialData(fixed))
     const selected = initial.goals.filter(goal => goal.unit === 'lbs').slice(0, 2)
     const snapshot = {
       ...initial,
@@ -270,7 +286,7 @@ describe('first-run data and resilient migration', () => {
   })
 
   it('does not complete a later-created goal from an observation that predates it', () => {
-    const initial = createInitialData(fixed)
+    const initial = unsharedSeededWeight(createInitialData(fixed))
     const selected = initial.goals.filter(goal => goal.unit === 'lbs').slice(0, 2)
     const snapshot = {
       ...initial,
@@ -290,7 +306,7 @@ describe('first-run data and resilient migration', () => {
   })
 
   it('repoints a newer goal that already uses a history included in a confirmed merge', () => {
-    const initial = createInitialData(fixed)
+    const initial = unsharedSeededWeight(createInitialData(fixed))
     const selected = initial.goals.filter(goal => goal.unit === 'lbs').slice(0, 2)
     const oldHistoryId = selected[0].measurementHistoryId!
     const newerGoal = {
@@ -340,5 +356,19 @@ describe('first-run data and resilient migration', () => {
     const migrated = migrateSnapshot({ ...initial, schema: 2, goals: [{ ...legacyGoal, deadline: '2026-10-20' }] }, fixed)
     expect(migrated.goals[0]).toMatchObject({ deadline: '2026-10-20', deadlineProvenance: 'manual' })
     expect(deadlineCorrectionPreview(migrated)).toEqual([])
+  })
+
+  it('normalizes only recognizable old seeded histories without duplicating or rewriting observations', () => {
+    const initial = createInitialData(fixed)
+    const oldIds = ['seed-goal-1', 'seed-goal-7', 'seed-goal-12']
+    const goals = initial.goals.map(goal => oldIds.includes(goal.id) ? { ...goal, measurementHistoryId: `measurement:${goal.id}`, evidenceSchedules: goal.evidenceSchedules.map(schedule => ({ ...schedule, historyId: `measurement:${goal.id}` })) } : goal)
+    const oldHistories = oldIds.map(id => ({ id: `measurement:${id}`, label: 'Weight', unit: 'lbs' as const, semanticKey: 'body-weight' as const, scopeKey: 'body', createdAt: fixed.toISOString() }))
+    const source = { ...initial, measurementSharingVersion: undefined, goals, measurementHistories: [...initial.measurementHistories.filter(history => history.id !== 'measurement:shared:body-weight'), ...oldHistories], progress: [{ id: 'w1', goalId: oldIds[0], historyId: `measurement:${oldIds[0]}`, value: 132, recordedAt: '2026-09-18T12:00:00.000Z', recordedOn: '2026-09-18' }] }
+    const migrated = migrateSnapshot(source, fixed)
+    expect(new Set(migrated.goals.filter(goal => oldIds.includes(goal.id)).map(goal => goal.measurementHistoryId))).toEqual(new Set(['measurement:shared:body-weight']))
+    expect(migrated.progress[0]).toMatchObject({ historyId: 'measurement:shared:body-weight', value: 132 })
+    expect(migrated.measurementHistories.filter(history => !history.mergedIntoId && history.semanticKey === 'body-weight')).toHaveLength(1)
+    expect(migrated.goals.find(goal => goal.id === oldIds[0])?.current).toBe(132)
+    expect(migrateSnapshot(migrated, fixed)).toEqual(migrated)
   })
 })
