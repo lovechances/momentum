@@ -117,7 +117,7 @@ export function createInitialData(date = new Date()): AppData {
     progressLinkSuggestions: suggestions,
     routineExclusions: [],
     reminderOccurrences: [],
-    planning: { anchorMonth: planningAnchorFor(date), trackingStartedOn },
+    planning: { anchorMonth: planningAnchorFor(date), trackingStartedOn, openedMonth: planningAnchorFor(date), reviewedDays: [] },
     periods: [],
     settings: {
       areas: ['Money', 'Business', 'Body', 'Life'],

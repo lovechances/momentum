@@ -200,7 +200,7 @@ describe('first-run data and resilient migration', () => {
     expect(migrated.evidence[0]).toMatchObject({ id: 'photo', goalIds: [goals[0].id], mediaId: 'media-photo', recordedOn: '2026-09-14' })
     expect(migrated.wins[0]).toMatchObject({ id: 'win', goalIds: [goals[0].id], recordedOn: '2026-09-14' })
     expect(migrated.goals[0]).toMatchObject({ deadline: '2026-10-14', deadlineProvenance: 'legacy-unknown' })
-    expect(migrated.planning).toEqual({ anchorMonth: '2026-09-01', trackingStartedOn: '2026-09-14' })
+    expect(migrated.planning).toMatchObject({ anchorMonth: '2026-09-01', trackingStartedOn: '2026-09-14', openedMonth: '2026-09-01', reviewedDays: [] })
     expect(migrated.periods).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: 'month:2026-09-01', start: '2026-09-01', end: '2026-09-30', effectiveStart: '2026-09-14', anchorMonth: '2026-09-01', finalized: false }),
       expect.objectContaining({ id: '3M:2026-04-01', start: '2026-04-01', end: '2026-06-30', finalized: true }),

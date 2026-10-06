@@ -20,9 +20,9 @@ export interface Goal {
   history:GoalAttempt[]; evidenceSchedules:EvidenceSchedule[]; createdAt:string
 }
 export interface Milestone { id:string; title:string; done:boolean; completedAt?:string }
-export interface GoalAttempt { at:string; action:'created'|'continued'|'adjusted'|'closed'|'completed'|'progressed'|'paused'|'resumed'|'reopened'|'milestone'; note?:string; current?:number; target?:number; deadline?:string }
-export interface TaskEvent { at:string; action:'edited'|'deleted'|'restored'|'excluded'|'completed'|'reopened'; title?:string; details?:string; section?:Section; dueDate?:string; kind?:TaskKind; goalId?:string }
-export interface Task { id:string; title:string; details?:string; section:Section; done:boolean; kind:TaskKind; goalId?:string; dueDate:string; sourceRoutineId?:string; createdAt:string; carriedCount:number; lightDay?:boolean; status?:TaskStatus; resolvedAt?:string; rolledToId?:string; history?:TaskEvent[] }
+export interface GoalAttempt { at:string; effectiveOn?:string; action:'created'|'continued'|'adjusted'|'closed'|'completed'|'progressed'|'paused'|'resumed'|'reopened'|'milestone'; note?:string; current?:number; target?:number; deadline?:string }
+export interface TaskEvent { at:string; effectiveOn?:string; action:'edited'|'deleted'|'restored'|'excluded'|'completed'|'reopened'; title?:string; details?:string; section?:Section; dueDate?:string; kind?:TaskKind; goalId?:string }
+export interface Task { id:string; title:string; details?:string; section:Section; done:boolean; completedOn?:string; kind:TaskKind; goalId?:string; dueDate:string; sourceRoutineId?:string; createdAt:string; carriedCount:number; lightDay?:boolean; status?:TaskStatus; resolvedAt?:string; rolledToId?:string; history?:TaskEvent[] }
 export interface Routine { id:string; title:string; section:Section; recurrence:{ type:'daily'|'weekdays'|'weekdays-custom'; weekdays?:number[] }; active:boolean; goalId?:string; createdAt:string; stoppedAt?:string }
 export interface EvidenceSchedule { id:string; kind:EvidenceKind; cadence:EvidenceCadence; historyId?:string; lastCapturedAt?:string; firstDueDate?:string; active:boolean; provenance?:EvidenceScheduleProvenance }
 export interface Evidence { id:string; goalId?:string; goalIds?:string[]; historyId?:string; observationId?:string; scheduleId?:string; kind:EvidenceKind; capturedAt:string; recordedOn?:string; note?:string; mediaId?:string; value?:number; milestoneId?:string }
@@ -33,7 +33,7 @@ export interface MeasurementHistory { id:string; label:string; unit?:string; sem
 export interface ProgressLinkSuggestion { id:string; label:string; goalIds:string[]; historyIds:string[]; status:'pending'|'confirmed'|'dismissed'; createdAt:string }
 export interface RoutineExclusion { id:string; routineId:string; date:string; createdAt:string }
 export interface ReminderOccurrence { id:string; trackId:string; scheduleId:string; dueDate:string; status:'due'|'snoozed'|'skipped'|'satisfied'; snoozedUntil?:string; handledAt?:string; satisfiedByEntryId?:string }
-export interface PlanningState { anchorMonth:string; trackingStartedOn:string }
+export interface PlanningState { anchorMonth:string; trackingStartedOn:string; openedMonth?:string; reviewedDays?:Array<{ date:string; recordedAt:string; result:'missed' }> }
 export interface PeriodRecord { id:string; kind:'week'|'month'|'3M'|'6M'|'year'; start:string; end:string; availableAt:string; finalized:boolean; anchorMonth?:string; effectiveStart?:string }
 export interface Reminder { id:string; kind:'morning'|'evidence'|'recap'|'deadline'|'planning'|'rollover'; title:string; detail?:string; dueDate:string; action?:string }
 export interface AppData { schema:3; measurementSharingVersion?:1; goals:Goal[]; tasks:Task[]; routines:Routine[]; evidence:Evidence[]; wins:Win[]; progress:ProgressEntry[]; measurementHistories:MeasurementHistory[]; progressLinkSuggestions:ProgressLinkSuggestion[]; routineExclusions:RoutineExclusion[]; reminderOccurrences:ReminderOccurrence[]; planning:PlanningState; periods:PeriodRecord[]; settings:Settings; onboarded:boolean; updatedAt:string }

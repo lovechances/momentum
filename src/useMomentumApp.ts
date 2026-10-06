@@ -3,6 +3,7 @@ import type { AppData, Evidence, EvidenceCadence, Goal, MediaRecord, ProgressEnt
 import { evidenceGoalIds, localDateOf, now, todayLocal } from './domain'
 import { confirmProgressLinkSuggestion, dismissProgressLinkSuggestion, migrateSnapshot } from './migrations'
 import { createInitialData } from './seed'
+import { completeReviewedGoal, completeTaskForPastDay, confirmMissedDay } from './lifecycle'
 import { currentSnapshotGeneration, readSnapshot, StaleSnapshotError, writeSnapshot, writeSnapshotAndMedia } from './storage'
 import { excludeRoutineOccurrence, reconcileEvidenceReminderPolicy, reconcileSchedule, removeRoutineTaskInstances, resolveRollover as resolveTaskRollover, restoreRoutineOccurrence, satisfyProgressReminderOccurrences, satisfyReminderOccurrences, satisfyWinReminderOccurrences, skipReminderInData, snoozeReminderInData, syncRoutineTaskInstances, updateEvidenceInData, updateEvidenceScheduleTrackInData, updateTaskInData } from './scheduler'
 import {
@@ -291,7 +292,9 @@ export function useMomentumApp() {
       setStorageErrorMessage(undefined)
       applyData(reconcile(migrateSnapshot(next)))
     },
-    toggleTask: (id: string) => update(source => ({ ...source, tasks: source.tasks.map(task => task.id === id ? { ...task, done: !task.done, resolvedAt: task.done ? undefined : now(), history: [...(task.history ?? []), { at: now(), action: task.done ? 'reopened' : 'completed' }] } : task) })),
+    toggleTask: (id: string) => update(source => ({ ...source, tasks: source.tasks.map(task => task.id === id ? { ...task, done: !task.done, completedOn: task.done ? undefined : task.dueDate, resolvedAt: task.done ? undefined : now(), history: [...(task.history ?? []), { at: now(), effectiveOn: task.done ? undefined : task.dueDate, action: task.done ? 'reopened' : 'completed' }] } : task) })),
+    completePastTask: (id: string, day: string) => update(source => completeTaskForPastDay(source, id, day)),
+    confirmMissedDay: (day: string) => update(source => confirmMissedDay(source, day)),
     addTask: (task: Task) => update(source => ({ ...source, tasks: [...source.tasks, task] })),
     updateTask: (task: Task) => update(source => updateTaskInData(source, task)),
     deleteTask: (id: string) => update(source => ({ ...source, tasks: source.tasks.map(task => task.id === id ? { ...task, status: 'deleted', history: [...(task.history ?? []), { at: now(), action: 'deleted' }] } : task) })),
@@ -311,6 +314,8 @@ export function useMomentumApp() {
     pauseGoal: (id: string) => update(source => ({ ...source, goals: source.goals.map(goal => goal.id === id ? markGoalPaused(goal) : goal) })),
     resumeGoal: (id: string) => update(source => ({ ...source, goals: source.goals.map(goal => goal.id === id ? markGoalResumed(goal) : goal) })),
     completeGoal: (id: string) => update(source => ({ ...source, goals: source.goals.map(goal => goal.id === id ? markGoalComplete(goal) : goal) })),
+    completeReviewedGoal: (id: string) => update(source => completeReviewedGoal(source, id)),
+    openPlanningMonth: (month: string) => update(source => ({ ...source, planning: { ...source.planning, openedMonth: month } })),
     reopenGoal: (id: string) => update(source => ({ ...source, goals: source.goals.map(goal => goal.id === id ? markGoalReopened(goal) : goal) })),
     toggleMilestone: (goalId: string, milestoneId: string, done: boolean, at = now()) => update(source => ({ ...source, goals: source.goals.map(goal => goal.id === goalId ? setMilestoneDone(goal, milestoneId, done, at) : goal) })),
     addGoal: (goal: Goal) => update(source => addGoalToData(source, goal)),

@@ -622,7 +622,7 @@ export function isRecapEligible(data: AppData, period: PeriodRecord, date = toda
   const evidence = canonicalEvidenceDates(data.evidence).some(item => item >= periodStart && item <= period.end)
   const win = data.wins.some(item => recordedDateOf(item) >= periodStart && recordedDateOf(item) <= period.end)
   const lifecycle = data.goals.some(goal => goal.history.some(item =>
-    item.action !== 'created' && localDateOf(item.at) >= periodStart && localDateOf(item.at) <= period.end,
+    item.action !== 'created' && (item.effectiveOn ?? localDateOf(item.at)) >= periodStart && (item.effectiveOn ?? localDateOf(item.at)) <= period.end,
   ))
   return meaningfulTask || progress || evidence || win || lifecycle
 }
@@ -633,7 +633,7 @@ function activityDates(data: AppData) {
     ...data.progress.map(recordedDateOf),
     ...canonicalEvidenceDates(data.evidence),
     ...data.wins.map(recordedDateOf),
-    ...data.goals.flatMap(goal => goal.history.map(item => localDateOf(item.at))),
+    ...data.goals.flatMap(goal => goal.history.map(item => item.effectiveOn ?? localDateOf(item.at))),
   ].filter(Boolean)
 }
 
@@ -667,11 +667,15 @@ export function reconcileSchedule(data: AppData, date = todayLocal()) {
       const existing = reminderOccurrences.find(occurrence => occurrence.id === item.occurrenceId)
       if (!existing) reminderOccurrences.push({ id: item.occurrenceId, trackId: item.trackId, scheduleId: item.schedule.id, dueDate: item.dueDate, status: 'due' })
       else if (existing.status === 'snoozed' && existing.snoozedUntil && existing.snoozedUntil <= date) reminderOccurrences = reminderOccurrences.map(occurrence => occurrence.id === existing.id ? { ...occurrence, status: 'due', snoozedUntil: undefined } : occurrence)
+      const measurement = item.schedule.historyId && item.schedule.kind === 'number'
+        ? data.measurementHistories.find(history => history.id === item.schedule.historyId && !history.mergedIntoId)
+        : undefined
+      const linkedCount = measurement ? data.goals.filter(goal => goal.status === 'active' && goal.measurementHistoryId === measurement.id).length : 0
       reminders.push({
         id: item.occurrenceId,
         kind: 'evidence',
-        title: `${item.schedule.cadence[0].toUpperCase() + item.schedule.cadence.slice(1)} ${item.schedule.kind} due`,
-        detail: item.goal.title,
+        title: measurement?.semanticKey === 'body-weight' ? 'Log weight' : measurement?.semanticKey === 'savings-balance' ? 'Update savings' : `${item.schedule.cadence[0].toUpperCase() + item.schedule.cadence.slice(1)} ${item.schedule.kind} due`,
+        detail: measurement ? `${measurement.label}${linkedCount > 1 ? ` · supports ${linkedCount} goals` : ''}` : item.goal.title,
         dueDate: item.dueDate,
         action: 'capture',
       })

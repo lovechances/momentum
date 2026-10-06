@@ -299,6 +299,16 @@ export function completeGoal(goal: Goal, at = now(), note?: string): Goal {
   }
 }
 
+/** A late review records when it was logged and which finished period earned it. */
+export function completeGoalForPeriod(goal: Goal, periodEnd: string, at = now()): Goal {
+  if (goal.status !== 'active' || periodEnd > goal.deadline || localDateOf(at) <= periodEnd) return goal
+  return {
+    ...goal,
+    status: 'completed',
+    history: [...goal.history, { at, effectiveOn: periodEnd, action: 'completed', note: 'Confirmed during period review', current: goal.current, target: goal.target, deadline: goal.deadline }],
+  }
+}
+
 export function pauseGoal(goal: Goal, at = now(), note?: string): Goal {
   if (goal.status !== 'active') return goal
   return {
@@ -405,7 +415,7 @@ export function reviewDeadline(
   goal: Goal,
   action: 'continue' | 'adjust' | 'close',
   reason: DeadlineReason,
-  options: { deadline?: string; target?: number; note?: string; at?: string } = {},
+  options: { deadline?: string; target?: number; title?: string; nextAction?: string; note?: string; at?: string } = {},
 ): Goal {
   if (!finite(options.target)) throw new Error('Goal target must be a finite number.')
   const at = options.at ?? now()
@@ -425,12 +435,18 @@ export function reviewDeadline(
     throw new Error('Continued goals need a real deadline after the review date.')
   }
   const target = action === 'adjust' ? options.target ?? goal.target : goal.target
+  const proposedTitle = action === 'adjust' ? options.title?.trim() || goal.title : goal.title
+  const title = action === 'adjust' && target !== goal.target && proposedTitle === goal.title
+    ? generatedNumericTitleFor(goal, target!) ?? proposedTitle
+    : proposedTitle
   const direction = action === 'adjust' && options.target !== undefined
     ? inferredDirection(goal.baseline, target) ?? goal.direction
     : goal.direction
   return {
     ...goal,
     status: 'active',
+    title,
+    nextAction: action === 'adjust' ? options.nextAction?.trim() || goal.nextAction : goal.nextAction,
     target,
     direction,
     deadline,

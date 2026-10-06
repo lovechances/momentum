@@ -13,6 +13,9 @@ export interface MomentumResult {
   weights: { moves: number; routines: number; progress: number }
   trend: number
   commitments: { moves: number; routines: number }
+  unknownDays: number
+  confirmedMissedDays: number
+  coverage: number
 }
 
 const WINDOW_DAYS = 14
@@ -38,6 +41,7 @@ function windowScore(
   end: string,
   excludeUnstartedEndDay: boolean,
   trackingStartedOn?: string,
+  reviewedDays: Array<{ date: string; result: 'missed' }> = [],
 ) {
   let scoreableTasks = tasks.filter(task =>
     task.dueDate >= start
@@ -56,20 +60,6 @@ function windowScore(
     }
   }
 
-  const dailyScore = (kind: 'move' | 'routine') => {
-    const matching = scoreableTasks.filter(task => task.kind === kind)
-    const dates = [...new Set(matching.map(task => task.dueDate))]
-    return {
-      score: average(dates.map(date => {
-        const day = matching.filter(task => task.dueDate === date)
-        return day.filter(task => task.done).length / day.length
-      })),
-      commitments: matching.length,
-    }
-  }
-
-  const move = dailyScore('move')
-  const routine = dailyScore('routine')
   const progressDates = new Set<string>()
   const progressScores: number[] = []
 
@@ -115,31 +105,35 @@ function windowScore(
     progressScores.push(clamp(((endValue - startValue) * direction) / targetDistance))
     for (const entry of inWindow) progressDates.add(recordedDateOf(entry))
   }
-
-  const progressScore = average(progressScores)
-  const components = [
-    { key: 'moves' as const, score: move.score, weight: baseWeights.moves },
-    { key: 'routines' as const, score: routine.score, weight: baseWeights.routines },
-    { key: 'progress' as const, score: progressScore, weight: baseWeights.progress },
-  ].filter((component): component is { key: keyof typeof baseWeights; score: number; weight: number } => component.score !== undefined)
-  const totalWeight = components.reduce((total, component) => total + component.weight, 0)
-  const rawScore = totalWeight
-    ? components.reduce((total, component) => total + component.score * component.weight, 0) / totalWeight
+  const reviewed = new Set(reviewedDays.filter(item => item.result === 'missed' && item.date >= start && item.date <= end).map(item => item.date))
+  const scheduledDates = new Set(scoreableTasks.map(task => task.dueDate))
+  const eligibleDates = new Set([...scoreableTasks.filter(task => task.done).map(task => task.completedOn ?? task.dueDate), ...progressDates, ...reviewed])
+  const unknownDays = [...scheduledDates].filter(date => !eligibleDates.has(date)).length
+  const confirmedMissedDays = [...reviewed].filter(date => !scoreableTasks.some(task => task.dueDate === date && task.done) && !progressDates.has(date)).length
+  const executionDates = [...eligibleDates].filter(date => scheduledDates.has(date) || reviewed.has(date))
+  const dailyScore = (kind: 'move' | 'routine') => average(executionDates.map(date => {
+    const day = scoreableTasks.filter(task => task.kind === kind && task.dueDate === date)
+    return day.length ? day.filter(task => task.done).length / day.length : 0
+  })) ?? 0
+  const moveScore = dailyScore('move')
+  const routineScore = dailyScore('routine')
+  const progressScore = average(progressScores) ?? 0
+  const coverage = eligibleDates.size + unknownDays ? eligibleDates.size / (eligibleDates.size + unknownDays) : 0
+  const rawScore = eligibleDates.size
+    ? moveScore * baseWeights.moves + routineScore * baseWeights.routines + progressScore * baseWeights.progress
     : 0
-  const effectiveWeights = { moves: 0, routines: 0, progress: 0 }
-  for (const component of components) effectiveWeights[component.key] = component.weight / totalWeight
-
-  const eligibleDates = new Set(scoreableTasks.map(task => task.dueDate))
-  for (const date of progressDates) eligibleDates.add(date)
   return {
     score: Math.round(rawScore * 100),
-    moves: Math.round((move.score ?? 0) * 100),
-    routines: Math.round((routine.score ?? 0) * 100),
-    progress: Math.round((progressScore ?? 0) * 100),
-    weights: effectiveWeights,
+    moves: Math.round(moveScore * 100),
+    routines: Math.round(routineScore * 100),
+    progress: Math.round(progressScore * 100),
+    weights: baseWeights,
     eligibleDays: eligibleDates.size,
-    commitments: { moves: move.commitments, routines: routine.commitments },
-    hasData: components.length > 0,
+    commitments: { moves: scoreableTasks.filter(task => task.kind === 'move').length, routines: scoreableTasks.filter(task => task.kind === 'routine').length },
+    unknownDays,
+    confirmedMissedDays,
+    coverage: Math.round(coverage * 100),
+    hasData: eligibleDates.size > 0,
   }
 }
 
@@ -148,18 +142,20 @@ export function calculateMomentum(
   goals: Goal[],
   progress: ProgressEntry[],
   date = todayLocal(),
-  options: { includeCurrentDay?: boolean; trackingStartedOn?: string } = {},
+  options: { includeCurrentDay?: boolean; trackingStartedOn?: string; reviewedDays?: Array<{ date: string; result: 'missed' }> } = {},
 ): MomentumResult {
   const nominalStart = addDays(date, -(WINDOW_DAYS - 1))
   const start = options.trackingStartedOn && options.trackingStartedOn > nominalStart ? options.trackingStartedOn : nominalStart
-  const current = windowScore(tasks, goals, progress, start, date, !options.includeCurrentDay, options.trackingStartedOn)
+  const current = windowScore(tasks, goals, progress, start, date, !options.includeCurrentDay, options.trackingStartedOn, options.reviewedDays)
   const previousEnd = addDays(nominalStart, -1)
   const nominalPreviousStart = addDays(previousEnd, -(WINDOW_DAYS - 1))
   const previousStart = options.trackingStartedOn && options.trackingStartedOn > nominalPreviousStart ? options.trackingStartedOn : nominalPreviousStart
-  const previous = windowScore(tasks, goals, progress, previousStart, previousEnd, false, options.trackingStartedOn)
+  const previous = windowScore(tasks, goals, progress, previousStart, previousEnd, false, options.trackingStartedOn, options.reviewedDays)
   return {
     score: current.score,
-    status: current.eligibleDays >= MIN_READY_DAYS ? 'ready' : 'building',
+    // An unreviewed scheduled day cannot be silently omitted to preserve a
+    // flattering published score. It affects readiness, never execution quality.
+    status: current.eligibleDays >= MIN_READY_DAYS && current.unknownDays === 0 ? 'ready' : 'building',
     eligibleDays: current.eligibleDays,
     moves: current.moves,
     routines: current.routines,
@@ -167,5 +163,8 @@ export function calculateMomentum(
     weights: current.weights,
     trend: previous.hasData ? current.score - previous.score : 0,
     commitments: current.commitments,
+    unknownDays: current.unknownDays,
+    confirmedMissedDays: current.confirmedMissedDays,
+    coverage: current.coverage,
   }
 }

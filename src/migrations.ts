@@ -40,6 +40,7 @@ function normalizeGoal(value: Partial<Goal>, fallback: Goal, legacy: boolean): G
   const history = Array.isArray(value.history)
     ? value.history.filter(item => isRecord(item) && isTimestamp(item.at) && historyActions.has(String(item.action))).map(item => ({
       at: item.at as string,
+      effectiveOn: isDate(item.effectiveOn) ? item.effectiveOn : undefined,
       action: item.action as Goal['history'][number]['action'],
       note: typeof item.note === 'string' ? item.note : undefined,
       current: typeof item.current === 'number' && Number.isFinite(item.current) ? item.current : undefined,
@@ -99,8 +100,10 @@ function normalizeTask(value: Partial<Task>, fallbackAt: string): Task | undefin
     status: taskStatuses.has(String(value.status)) ? value.status : 'active',
     resolvedAt: isTimestamp(value.resolvedAt) ? value.resolvedAt : undefined,
     rolledToId: typeof value.rolledToId === 'string' ? value.rolledToId : undefined,
+    completedOn: isDate(value.completedOn) ? value.completedOn : undefined,
     history: Array.isArray(value.history) ? value.history.filter(item => isRecord(item) && isTimestamp(item.at) && ['edited', 'deleted', 'restored', 'excluded', 'completed', 'reopened'].includes(String(item.action))).map(item => ({
       at: item.at as string, action: item.action as NonNullable<Task['history']>[number]['action'],
+      effectiveOn: isDate(item.effectiveOn) ? item.effectiveOn : undefined,
       title: typeof item.title === 'string' ? item.title : undefined,
       details: typeof item.details === 'string' ? item.details : undefined,
       section: sections.has(String(item.section)) ? item.section as Task['section'] : undefined,
@@ -338,6 +341,8 @@ export function migrateSnapshot(value: unknown, date = new Date()): AppData {
   const planning = {
     anchorMonth: isDate(rawPlanning.anchorMonth) ? rawPlanning.anchorMonth : planningAnchorFor(trackingStartedOn),
     trackingStartedOn,
+    openedMonth: isDate(rawPlanning.openedMonth) ? rawPlanning.openedMonth : planningAnchorFor(trackingStartedOn),
+    reviewedDays: Array.isArray(rawPlanning.reviewedDays) ? unique(rawPlanning.reviewedDays.filter(isRecord).filter(item => isDate(item.date) && isTimestamp(item.recordedAt) && item.result === 'missed').map(item => ({ id: String(item.date), date: item.date as string, recordedAt: item.recordedAt as string, result: 'missed' as const }))).map(({ date, recordedAt, result }) => ({ date, recordedAt, result })) : [],
   }
   const periods = unique(sourcePeriods.flatMap(period => {
     if (!legacy) return [period]

@@ -40,7 +40,7 @@ export function isMeaningfulRecap(data: AppData, period: PeriodRecord) {
     || data.progress.some(item => inPeriod(recordedDateOf(item), scopedPeriod))
     || evidenceCaptureGroups(data).some(capture => inPeriod(recordedDateOf(capture.canonical), scopedPeriod))
     || data.wins.some(item => inPeriod(recordedDateOf(item), scopedPeriod))
-    || data.goals.some(goal => goal.history.some(item => item.action !== 'created' && inPeriod(localDateOf(item.at), scopedPeriod)))
+    || data.goals.some(goal => goal.history.some(item => item.action !== 'created' && inPeriod(item.effectiveOn ?? localDateOf(item.at), scopedPeriod)))
 }
 
 export function recapFacts(data: AppData, period: PeriodRecord): RecapFacts {
@@ -107,22 +107,22 @@ export function recapFacts(data: AppData, period: PeriodRecord): RecapFacts {
       .flatMap(capture => capture.items.filter(item => item.kind === 'milestone').slice(0, 1))
       .map(item => item.note?.trim() || data.goals.find(goal => goal.id === item.goalId)?.milestones.find(milestone => milestone.id === item.milestoneId)?.title),
     ...data.goals.flatMap(goal => goal.history
-      .filter(item => inPeriod(localDateOf(item.at), scopedPeriod) && item.note?.startsWith('Completed milestone: '))
+      .filter(item => inPeriod(item.effectiveOn ?? localDateOf(item.at), scopedPeriod) && item.note?.startsWith('Completed milestone: '))
       .map(item => item.note!.slice('Completed milestone: '.length).trim())),
   ].filter((value): value is string => Boolean(value)))]
   const completedGoals = data.goals.flatMap(goal => {
     let completionIndex = -1
     goal.history.forEach((item, index) => {
-      if (item.action === 'completed' && inPeriod(localDateOf(item.at), scopedPeriod)) completionIndex = index
+      if (item.action === 'completed' && inPeriod(item.effectiveOn ?? localDateOf(item.at), scopedPeriod)) completionIndex = index
     })
     if (completionIndex < 0) return []
     const reopenedBeforePeriodEnd = goal.history.slice(completionIndex + 1).some(item =>
-      item.action === 'reopened' && localDateOf(item.at) <= period.end,
+      item.action === 'reopened' && (item.effectiveOn ?? localDateOf(item.at)) <= period.end,
     )
     return reopenedBeforePeriodEnd ? [] : [goal.title]
   })
 
-  const momentum = calculateMomentum(tasks, data.goals, data.progress, period.end, { includeCurrentDay: true, trackingStartedOn: periodStart })
+  const momentum = calculateMomentum(tasks, data.goals, data.progress, period.end, { includeCurrentDay: true, trackingStartedOn: periodStart, reviewedDays: data.planning.reviewedDays })
   return {
     period,
     momentum: momentum.score,
@@ -137,4 +137,16 @@ export function recapFacts(data: AppData, period: PeriodRecord): RecapFacts {
     strongest,
     needsAttention,
   }
+}
+
+/** Select only facts with a story; images remain attached to the fact they prove. */
+export function recapStorySelection(data: AppData, facts: RecapFacts) {
+  const start = [facts.period.effectiveStart ?? facts.period.start, data.planning.trackingStartedOn].sort().at(-1)!
+  const numeric = facts.numeric.filter(item => item.hasComparison && item.change !== 0)
+    .sort((a, b) => Math.abs(b.change / (b.start || 1)) - Math.abs(a.change / (a.start || 1)) || a.historyId.localeCompare(b.historyId))
+  const mediaForHistory = (historyId: string) => evidenceCaptureGroups(data)
+    .filter(group => recordedDateOf(group.canonical) >= start && recordedDateOf(group.canonical) <= facts.period.end
+      && group.items.some(item => item.historyId === historyId))
+    .flatMap(group => group.items.flatMap(item => item.mediaId ? [{ mediaId: item.mediaId, alt: item.note?.trim() || `${item.kind} evidence` }] : []))[0]
+  return { numeric: numeric.map(item => ({ ...item, evidence: mediaForHistory(item.historyId) })), completedGoals: facts.completedGoals, milestones: facts.milestones, wins: facts.wins }
 }

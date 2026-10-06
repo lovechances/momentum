@@ -41,6 +41,7 @@ function validHistory(value: unknown) {
   const actions = ['created', 'continued', 'adjusted', 'closed', 'completed', 'progressed', 'paused', 'resumed', 'reopened', 'milestone'] as const
   return Array.isArray(value) && value.every(item => record(item)
     && timestamp(item.at)
+    && (item.effectiveOn === undefined || localDate(item.effectiveOn))
     && oneOf(item.action, actions)
     && (item.note === undefined || text(item.note))
     && optionalFinite(item.current)
@@ -102,6 +103,7 @@ function validTask(value: unknown) {
     && oneOf(value.kind, ['task', 'routine', 'move'] as const)
     && (value.goalId === undefined || nonEmpty(value.goalId))
     && localDate(value.dueDate)
+    && (value.completedOn === undefined || localDate(value.completedOn))
     && (value.sourceRoutineId === undefined || nonEmpty(value.sourceRoutineId))
     && timestamp(value.createdAt)
     && nonnegativeSafeInteger(value.carriedCount)
@@ -109,6 +111,10 @@ function validTask(value: unknown) {
     && (value.status === undefined || oneOf(value.status, ['active', 'rolled', 'dropped', 'excluded', 'deleted'] as const))
     && (value.resolvedAt === undefined || timestamp(value.resolvedAt))
     && (value.rolledToId === undefined || nonEmpty(value.rolledToId))
+    && (value.history === undefined || (Array.isArray(value.history) && value.history.every(item => record(item)
+      && timestamp(item.at)
+      && (item.effectiveOn === undefined || localDate(item.effectiveOn))
+      && oneOf(item.action, ['edited', 'deleted', 'restored', 'excluded', 'completed', 'reopened'] as const))))
 }
 
 function validRoutine(value: unknown) {
@@ -259,7 +265,10 @@ function validCurrentData(value: unknown): value is AppData {
     && (item.handledAt === undefined || timestamp(item.handledAt))
     && (item.satisfiedByEntryId === undefined || nonEmpty(item.satisfiedByEntryId)))) return false
   if (!uniqueIds(value.reminderOccurrences as { id: string }[])) return false
-  if (!record(value.planning) || !localDate(value.planning.anchorMonth) || !value.planning.anchorMonth.endsWith('-01') || !localDate(value.planning.trackingStartedOn)) return false
+  if (!record(value.planning) || !localDate(value.planning.anchorMonth) || !value.planning.anchorMonth.endsWith('-01') || !localDate(value.planning.trackingStartedOn)
+    || (value.planning.openedMonth !== undefined && !localDate(value.planning.openedMonth))
+    || (value.planning.reviewedDays !== undefined && (!Array.isArray(value.planning.reviewedDays)
+      || !value.planning.reviewedDays.every(item => record(item) && localDate(item.date) && timestamp(item.recordedAt) && item.result === 'missed')))) return false
   return true
 }
 

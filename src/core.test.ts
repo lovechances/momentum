@@ -620,7 +620,7 @@ describe('Momentum', () => {
   it('has an explicit, honest cold-start state', () => {
     expect(calculateMomentum([], [], [], '2026-09-14')).toMatchObject({ score: 0, status: 'building', eligibleDays: 0 })
     const first = calculateMomentum([task('r', '2026-09-14', 'routine', true)], [], [], '2026-09-14')
-    expect(first).toMatchObject({ score: 100, status: 'building', eligibleDays: 1 })
+    expect(first).toMatchObject({ score: 25, status: 'building', eligibleDays: 1 })
   })
 
   it('does not count an untouched current morning as a failed day', () => {
@@ -631,13 +631,13 @@ describe('Momentum', () => {
 
   it('becomes ready after three eligible execution days', () => {
     const tasks = ['2026-09-12', '2026-09-13', '2026-09-14'].map((date, index) => task(`r${index}`, date, 'routine', true))
-    expect(calculateMomentum(tasks, [], [], '2026-09-14')).toMatchObject({ status: 'ready', eligibleDays: 3, score: 100 })
+    expect(calculateMomentum(tasks, [], [], '2026-09-14')).toMatchObject({ status: 'ready', eligibleDays: 3, score: 25 })
   })
 
-  it('uses effective weights when a component is absent', () => {
+  it('keeps goal-directed execution dominant when other components are absent', () => {
     const result = calculateMomentum([task('m', '2026-09-13', 'move', true)], [], [], '2026-09-14')
-    expect(result.score).toBe(100)
-    expect(result.weights).toEqual({ moves: 1, routines: 0, progress: 0 })
+    expect(result.score).toBe(65)
+    expect(result.weights).toEqual({ moves: 0.65, routines: 0.25, progress: 0.10 })
   })
 
   it('excludes light-day commitments', () => {
@@ -648,7 +648,7 @@ describe('Momentum', () => {
   it('averages days so a pile of trivial tasks cannot overpower another day', () => {
     const many = Array.from({ length: 10 }, (_, index) => task(`m${index}`, '2026-09-13', 'move', true))
     const missed = task('missed', '2026-09-14', 'move', false)
-    const result = calculateMomentum([...many, missed], [], [], '2026-09-14', { includeCurrentDay: true })
+    const result = calculateMomentum([...many, missed], [], [], '2026-09-14', { includeCurrentDay: true, reviewedDays: [{ date: '2026-09-14', result: 'missed' }] })
     expect(result.moves).toBe(50)
   })
 
@@ -658,9 +658,9 @@ describe('Momentum', () => {
       task('expired', '2026-08-17', 'move', true),
       task('new', '2026-09-10', 'move', true),
     ]
-    const result = calculateMomentum(tasks, [], [], '2026-09-14', { includeCurrentDay: true })
+    const result = calculateMomentum(tasks, [], [], '2026-09-14', { includeCurrentDay: true, reviewedDays: [{ date: '2026-08-31', result: 'missed' }] })
     expect(result.moves).toBe(100)
-    expect(result.trend).toBe(100)
+    expect(result.trend).toBe(65)
   })
 
   it('scores real in-window progress in either direction and ignores future entries', () => {
@@ -672,7 +672,27 @@ describe('Momentum', () => {
     ]
     const result = calculateMomentum([], [downward], progress, '2026-09-14')
     expect(result.progress).toBe(50)
-    expect(result.score).toBe(50)
+    expect(result.score).toBe(5)
+  })
+
+  it('counts measured progress only in its own 10% component', () => {
+    const measuredGoal = goal({ baseline: 140, target: 150 })
+    const moves = ['2026-09-11', '2026-09-12', '2026-09-13'].map((day, index) => task(`m${index}`, day, 'move', true))
+    const progress = [
+      { id: 'before', goalId: measuredGoal.id, value: 140, recordedAt: iso('2026-08-31') },
+      { id: 'after', goalId: measuredGoal.id, value: 150, recordedAt: iso('2026-09-12') },
+    ]
+    expect(calculateMomentum(moves, [measuredGoal], progress, '2026-09-14')).toMatchObject({ status: 'ready', moves: 100, progress: 100, score: 75 })
+  })
+
+  it('does not treat a measurement-only day as missed execution', () => {
+    const measuredGoal = goal({ baseline: 140, target: 150 })
+    const moves = ['2026-09-10', '2026-09-11', '2026-09-12'].map((day, index) => task(`m${index}`, day, 'move', true))
+    const progress = [
+      { id: 'before', goalId: measuredGoal.id, value: 140, recordedAt: iso('2026-08-31') },
+      { id: 'after', goalId: measuredGoal.id, value: 150, recordedAt: iso('2026-09-13') },
+    ]
+    expect(calculateMomentum(moves, [measuredGoal], progress, '2026-09-14')).toMatchObject({ moves: 100, progress: 100, score: 75, eligibleDays: 4 })
   })
 
   it('does not attribute lifetime progress to the current window from one recent observation', () => {
@@ -694,8 +714,8 @@ describe('Momentum', () => {
 
   it('does not penalize numeric goals with no update in the window', () => {
     const result = calculateMomentum([task('m', '2026-09-13', 'move', true)], [goal()], [], '2026-09-14')
-    expect(result.score).toBe(100)
-    expect(result.weights.progress).toBe(0)
+    expect(result.score).toBe(65)
+    expect(result.progress).toBe(0)
   })
 
   it('scores one explicitly shared observation history only once', () => {
@@ -1011,7 +1031,7 @@ describe('truthful recaps', () => {
       progress: [{ id: 'first', goalId: 'g', value: 143, recordedAt: iso('2026-09-12') }],
     })
     expect(recapFacts(snapshot, period).numeric[0]).toMatchObject({ start: 143, end: 143, hasComparison: false })
-    expect(calculateMomentum([], [firstValueGoal], snapshot.progress, '2026-09-14').weights.progress).toBe(0)
+    expect(calculateMomentum([], [firstValueGoal], snapshot.progress, '2026-09-14').progress).toBe(0)
   })
 
   it('counts only actual completion events and excludes light-day commitments', () => {
